@@ -1,11 +1,14 @@
 mod config;
 mod remote;
 mod ui;
+mod jail;
+mod image;
 
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result};
+
 use indicatif::ProgressBar;
 use std::path::PathBuf;
-use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -28,6 +31,235 @@ enum Commands {
     Restart,
 }
 
+fn maybe_doas(cmd: &str, doas: bool) -> String {
+    if doas {
+        format!("doas {}", cmd)
+    } else {
+        cmd.to_string()
+    }
+}
+
+fn deploy_host(config: &config::Config, host: &str, spinner: &ProgressBar, restart_service: &dyn Fn(&str, &ProgressBar) -> Result<()>) -> Result<()> {
+    let app_dir = format!("/var/db/bsdeploy/{}/app", config.service);
+    let env_file = format!("/usr/local/etc/bsdeploy/{}/env", config.service);
+    
+    // 1. Ensure app directory exists
+    spinner.set_message(format!("[{}] Ensuring app directory...", host));
+    remote::run(host, &maybe_doas(&format!("mkdir -p {}", app_dir), config.doas))?;
+
+    // 2. Sync files
+    spinner.set_message(format!("[{}] Syncing files...", host));
+    remote::sync(host, ".", &app_dir, config.doas)?;
+    
+    // Fix permissions after sync if user is set
+    if let Some(user) = &config.user {
+            spinner.set_message(format!("[{}] Setting permissions...", host));
+            remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, app_dir), config.doas))?;
+    }
+
+    // 3. Before Start
+    for cmd in &config.before_start {
+        spinner.set_message(format!("[{}] Running before_start: {}...", host, cmd));
+        // Use bash instead of sh
+        let full_cmd = format!(
+            "bash -c 'source {} && cd {} && {}'",
+            env_file, app_dir, cmd
+        );
+        
+        // Run before_start as user if set? Usually yes.
+        let exec_cmd = if let Some(user) = &config.user {
+            format!("su - {} -c \"{}\"", user, full_cmd.replace("\"", "\\\""))
+        } else {
+            full_cmd
+        };
+
+        remote::run(host, &maybe_doas(&exec_cmd, config.doas))?;
+    }
+
+    // 4. Start (via helper)
+    restart_service(host, spinner)?;
+
+    Ok(())
+}
+
+fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Result<()> {
+    // 1. Determine Base Version
+    let base_version = if let Some(j) = &config.jail {
+        if let Some(v) = &j.base_version {
+            v.clone()
+        } else {
+            let os_release = remote::get_os_release(host)?;
+            // Strip patch level (e.g., 14.1-RELEASE-p6 -> 14.1-RELEASE)
+            os_release.split("-p").next().unwrap_or(&os_release).to_string()
+        }
+    } else {
+        let os_release = remote::get_os_release(host)?;
+        os_release.split("-p").next().unwrap_or(&os_release).to_string()
+    };
+    
+    let subnet = config.jail.as_ref().and_then(|j| j.ip_range.as_deref()).unwrap_or("10.0.0.0/24");
+
+    spinner.set_message(format!("[{}] Ensuring base system {}...", host, base_version));
+    jail::ensure_base(host, &base_version, config.doas)?;
+
+    // 2. Ensure Image (Base + Packages + Mise)
+    spinner.set_message(format!("[{}] Checking image...", host));
+    let image_path = image::ensure_image(config, host, &base_version, spinner)?;
+    
+    // 3. Create Jail from Image
+    spinner.set_message(format!("[{}] Creating new jail from image...", host));
+    let jail_info = jail::create(host, &config.service, &base_version, subnet, Some(&image_path), &config.data_directories, config.doas)?;
+    spinner.set_message(format!("[{}] Jail created: {} ({})", host, jail_info.name, jail_info.ip));
+
+    let cmd_prefix = if config.doas { "doas " } else { "" };
+
+    // 4. Start Jail (Phase 1: Inherit IP for Before Start hooks like bundle install)
+    spinner.set_message(format!("[{}] Starting jail (build phase)...", host));
+    let build_start_cmd = format!(
+        "{}jail -c name={} path={} host.hostname={} ip4=inherit allow.raw_sockets=1 persist",
+        cmd_prefix, jail_info.name, jail_info.path, jail_info.name
+    );
+    remote::run(host, &build_start_cmd)?;
+
+    // 5. Sync App
+    spinner.set_message(format!("[{}] Syncing app to jail...", host));
+    let app_dir = "/app"; 
+    let host_app_dir = format!("{}/app", jail_info.path);
+    
+    remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, host_app_dir))?;
+    remote::sync(host, ".", &host_app_dir, config.doas)?;
+    
+    if let Some(user) = &config.user {
+        remote::run(host, &format!("{}jexec {} chown -R {} {}", cmd_prefix, jail_info.name, user, app_dir))?;
+    }
+
+    // 6. Config & Env
+    let mut env_content = String::new();
+    for map in &config.env.clear {
+        for (k, v) in map { env_content.push_str(&format!("export {}='{}'\n", k, v.replace("'", "'\\''"))); }
+    }
+    for k in &config.env.secret {
+         let v = std::env::var(k)?;
+         env_content.push_str(&format!("export {}='{}'\n", k, v.replace("'", "'\\''")));
+    }
+    if !config.mise.is_empty() { env_content.push_str("\neval \"$(mise activate bash)\"\n"); }
+    
+    let env_path = format!("{}/etc/bsdeploy.env", jail_info.path);
+    remote::write_file(host, &env_content, &env_path, config.doas)?;
+
+    // 7. Before Start (Inherit IP)
+    // Trust mise config first (as user)
+    if let Some(user) = &config.user {
+        let trust_cmd = format!("{}jexec {} su - {} -c 'mise trust {}'", cmd_prefix, jail_info.name, user, app_dir);
+        remote::run(host, &trust_cmd).ok(); 
+    } else {
+        let trust_cmd = format!("{}jexec {} bash -c 'mise trust {}'", cmd_prefix, jail_info.name, app_dir);
+        remote::run(host, &trust_cmd).ok();
+    }
+
+    for cmd in &config.before_start {
+        spinner.set_message(format!("[{}] Jail: Running {}...", host, cmd));
+        let full_cmd = format!("bash -c 'source /etc/bsdeploy.env && cd {} && {}'", app_dir, cmd);
+        let exec_cmd = if let Some(user) = &config.user {
+             format!("{}jexec {} su - {} -c \"{}\"", cmd_prefix, jail_info.name, user, full_cmd.replace("\"", "\\\""))
+        } else {
+             format!("{}jexec {} {}", cmd_prefix, jail_info.name, full_cmd)
+        };
+        remote::run(host, &exec_cmd)?;
+    }
+
+    // 8. Restart Jail (Private IP)
+    spinner.set_message(format!("[{}] Restarting jail with isolated networking...", host));
+    remote::run(host, &format!("{}jail -r {}", cmd_prefix, jail_info.name))?;
+    
+    let run_start_cmd = format!(
+        "{}jail -c name={} path={} host.hostname={} ip4.addr={} allow.raw_sockets=1 persist",
+        cmd_prefix, jail_info.name, jail_info.path, jail_info.name, jail_info.ip
+    );
+    remote::run(host, &run_start_cmd)?;
+
+    // 9. Start Service
+    for cmd in &config.start {
+        spinner.set_message(format!("[{}] Jail: Starting service...", host));
+        let log_file = "/var/log/service.log";
+        let pid_file = "/var/run/service.pid";
+        
+        let mut daemon_cmd = format!("daemon -f -p {} -o {}", pid_file, log_file);
+        if let Some(u) = &config.user { daemon_cmd.push_str(&format!(" -u {}", u)); }
+        
+        let full_cmd = format!("{} bash -c 'source /etc/bsdeploy.env && cd {} && {}'", daemon_cmd, app_dir, cmd);
+        
+        remote::run(host, &format!("{}jexec {} {}", cmd_prefix, jail_info.name, full_cmd))?;
+    }
+
+    // 10. Update Proxy
+    if let Some(proxy) = &config.proxy {
+         spinner.set_message(format!("[{}] Switching traffic to {}...", host, jail_info.ip));
+         let proxy_conf_content = format!(
+            "{} {{\n    reverse_proxy {}:{} \n}}\n", 
+            proxy.hostname, jail_info.ip, proxy.port
+        );
+        let caddy_conf_path = format!("/usr/local/etc/caddy/conf.d/{}.caddy", config.service);
+        remote::write_file(host, &proxy_conf_content, &caddy_conf_path, config.doas)?;
+        remote::run(host, &format!("{}service caddy reload", cmd_prefix))?;
+    }
+
+    // 11. Prune Old Jails
+    spinner.set_message(format!("[{}] Pruning old jails...", host));
+    let jls_cmd = format!("jls name | grep '^{}-' || true", config.service);
+    if let Ok(jails_out) = remote::run_with_output(host, &jls_cmd) {
+        let mut jails: Vec<String> = jails_out.lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        jails.sort(); // Sort by timestamp (name format service-timestamp)
+        
+        // Keep last 3 jails
+        if jails.len() > 3 {
+            let to_remove_count = jails.len() - 3;
+            let to_remove = &jails[0..to_remove_count];
+            for jname in to_remove {
+                if jname == &jail_info.name { continue; } // Don't remove current
+                spinner.set_message(format!("[{}] Removing old jail {}...", host, jname));
+                
+                // Get IP and Path before stopping
+                let info_cmd = format!("jls -j {} ip4.addr path", jname);
+                if let Ok(info_out) = remote::run_with_output(host, &info_cmd) {
+                    let parts: Vec<&str> = info_out.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let jip = parts[0];
+                        let jpath = parts[1];
+
+                        // 1. Stop jail
+                        remote::run(host, &format!("{}jail -r {}", cmd_prefix, jname)).ok();
+
+                        // 2. Remove IP alias
+                        if jip != "-" && !jip.is_empty() {
+                            remote::run(host, &format!("{}ifconfig lo1 inet {} -alias", cmd_prefix, jip)).ok();
+                        }
+
+                        // 3. Unmount all under jpath
+                        let mount_check = format!("mount | grep '{}' | awk '{{print $3}}'", jpath);
+                        if let Ok(mounts) = remote::run_with_output(host, &mount_check) {
+                            for mnt in mounts.lines().rev() {
+                                if !mnt.trim().is_empty() {
+                                    remote::run(host, &format!("{}umount -f {}", cmd_prefix, mnt.trim())).ok();
+                                }
+                            }
+                        }
+
+                        // 4. Remove dir
+                        remote::run(host, &format!("{}chflags -R noschg {}", cmd_prefix, jpath)).ok();
+                        remote::run(host, &format!("{}rm -rf {}", cmd_prefix, jpath)).ok();
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
@@ -41,14 +273,6 @@ fn main() -> Result<()> {
     };
 
     ui::print_step(&format!("Loaded configuration for service: {}", config.service));
-
-    let maybe_doas = |cmd: &str| -> String {
-        if config.doas {
-            format!("doas {}", cmd)
-        } else {
-            cmd.to_string()
-        }
-    };
 
     let restart_service = |host: &str, spinner: &ProgressBar| -> Result<()> {
         let app_dir = format!("/var/db/bsdeploy/{}/app", config.service);
@@ -85,7 +309,7 @@ fn main() -> Result<()> {
             pid_file
         );
         // We use 'sh -c' explicitly to handle the shell logic
-        let _ = remote::run(host, &maybe_doas(&format!("sh -c '{}'", stop_cmd)));
+        let _ = remote::run(host, &maybe_doas(&format!("sh -c '{}'", stop_cmd), config.doas));
 
         for cmd in &config.start {
             spinner.set_message(format!("[{}] Starting: {}...", host, cmd));
@@ -103,7 +327,7 @@ fn main() -> Result<()> {
                 "{} bash -c 'source {} && cd {} && {}'",
                 daemon_cmd, env_file, app_dir, cmd
             );
-            remote::run(host, &maybe_doas(&full_cmd))?;
+            remote::run(host, &maybe_doas(&full_cmd, config.doas))?;
         }
         Ok(())
     };
@@ -134,11 +358,11 @@ fn main() -> Result<()> {
                 
                 // 1. Update pkg
                 spinner.set_message(format!("[{}] Updating pkg repositories...", host));
-                remote::run(host, &maybe_doas("pkg update"))?;
+                remote::run(host, &maybe_doas("pkg update", config.doas))?;
                 
                 // 2. Install default packages (including bash)
                 spinner.set_message(format!("[{}] Installing default packages...", host));
-                remote::run(host, &maybe_doas("pkg install -y caddy rsync git bash"))?;
+                remote::run(host, &maybe_doas("pkg install -y caddy rsync git bash", config.doas))?;
 
                 // 2.5 Create User if needed (Moved before Mise setup)
                 if let Some(user) = &config.user {
@@ -146,7 +370,7 @@ fn main() -> Result<()> {
                     // Check if user exists, if not create
                     let check_user = remote::run(host, &format!("id {}", user));
                     if check_user.is_err() {
-                        remote::run(host, &maybe_doas(&format!("pw useradd -n {} -m -s /usr/local/bin/bash", user)))?;
+                        remote::run(host, &maybe_doas(&format!("pw useradd -n {} -m -s /usr/local/bin/bash", user), config.doas))?;
                     }
                 }
 
@@ -154,14 +378,14 @@ fn main() -> Result<()> {
                 if !config.packages.is_empty() {
                     spinner.set_message(format!("[{}] Installing user packages...", host));
                     let pkgs = config.packages.join(" ");
-                    remote::run(host, &maybe_doas(&format!("pkg install -y {}", pkgs)))?;
+                    remote::run(host, &maybe_doas(&format!("pkg install -y {}", pkgs), config.doas))?;
                 }
 
                 // 4. Install Mise and Tools
                 if !config.mise.is_empty() {
                     spinner.set_message(format!("[{}] Installing Mise and build deps...", host));
                     // Install build deps: gmake, gcc, python3, pkgconf
-                    remote::run(host, &maybe_doas("pkg install -y mise gmake gcc python3 pkgconf"))?;
+                    remote::run(host, &maybe_doas("pkg install -y mise gmake gcc python3 pkgconf", config.doas))?;
 
                     for (tool, version) in &config.mise {
                         spinner.set_message(format!("[{}] Installing {}@{}...", host, tool, version));
@@ -177,35 +401,35 @@ fn main() -> Result<()> {
                              format!("bash -c '{}'", cmd)
                         };
 
-                        remote::run(host, &maybe_doas(&exec_cmd))?;
+                        remote::run(host, &maybe_doas(&exec_cmd, config.doas))?;
                     }
                 }
 
                 // 5. Setup directories
                 spinner.set_message(format!("[{}] Creating directories...", host));
                 let app_dir = format!("/var/db/bsdeploy/{}/app", config.service);
-                remote::run(host, &maybe_doas(&format!("mkdir -p {}", app_dir)))?;
+                remote::run(host, &maybe_doas(&format!("mkdir -p {}", app_dir), config.doas))?;
 
                 let config_dir = format!("/usr/local/etc/bsdeploy/{}", config.service);
-                remote::run(host, &maybe_doas(&format!("mkdir -p {}", config_dir)))?;
+                remote::run(host, &maybe_doas(&format!("mkdir -p {}", config_dir), config.doas))?;
 
                 for dir in &config.data_directories {
-                    remote::run(host, &maybe_doas(&format!("mkdir -p {}", dir)))?;
+                    remote::run(host, &maybe_doas(&format!("mkdir -p {}", dir), config.doas))?;
                 }
                 
                 // Create user-specific run/log dirs if needed
                 if let Some(user) = &config.user {
                     let run_dir = format!("/var/run/bsdeploy/{}", config.service);
                     let log_dir = format!("/var/log/bsdeploy/{}", config.service);
-                    remote::run(host, &maybe_doas(&format!("mkdir -p {}", run_dir)))?;
-                    remote::run(host, &maybe_doas(&format!("mkdir -p {}", log_dir)))?;
-                    remote::run(host, &maybe_doas(&format!("chown {}:{} {}", user, user, run_dir)))?;
-                    remote::run(host, &maybe_doas(&format!("chown {}:{} {}", user, user, log_dir)))?;
+                    remote::run(host, &maybe_doas(&format!("mkdir -p {}", run_dir), config.doas))?;
+                    remote::run(host, &maybe_doas(&format!("mkdir -p {}", log_dir), config.doas))?;
+                    remote::run(host, &maybe_doas(&format!("chown {}:{} {}", user, user, run_dir), config.doas))?;
+                    remote::run(host, &maybe_doas(&format!("chown {}:{} {}", user, user, log_dir), config.doas))?;
                     
                     // Also chown app_dir and data directories
-                    remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, format!("/var/db/bsdeploy/{}", config.service))))?;
+                    remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, format!("/var/db/bsdeploy/{}", config.service)), config.doas))?;
                     for dir in &config.data_directories {
-                        remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, dir)))?;
+                        remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, dir), config.doas))?;
                     }
                 }
 
@@ -217,11 +441,11 @@ fn main() -> Result<()> {
                 // 7. Caddy Setup
                 spinner.set_message(format!("[{}] Configuring Caddy...", host));
                 // Enable caddy
-                remote::run(host, &maybe_doas("sysrc caddy_enable=YES"))?;
+                remote::run(host, &maybe_doas("sysrc caddy_enable=YES", config.doas))?;
                 
                 // Ensure conf.d exists
                 let caddy_conf_d = "/usr/local/etc/caddy/conf.d";
-                remote::run(host, &maybe_doas(&format!("mkdir -p {}", caddy_conf_d)))?;
+                remote::run(host, &maybe_doas(&format!("mkdir -p {}", caddy_conf_d), config.doas))?;
 
                 // Check/Create main Caddyfile
                 let caddyfile = "/usr/local/etc/caddy/Caddyfile";
@@ -258,8 +482,8 @@ fn main() -> Result<()> {
                 }
 
                 // Restart caddy
-                remote::run(host, &maybe_doas("service caddy enable"))?;
-                remote::run(host, &maybe_doas("service caddy restart"))?;
+                remote::run(host, &maybe_doas("service caddy enable", config.doas))?;
+                remote::run(host, &maybe_doas("service caddy restart", config.doas))?;
                 
                 spinner.finish_with_message(format!("Setup complete for {}", host));
                 ui::print_success(&format!("{} setup successfully", host));
@@ -270,45 +494,16 @@ fn main() -> Result<()> {
             
             for host in &config.hosts {
                 let spinner = ui::create_spinner(&format!("Deploying to {}", host));
-                let app_dir = format!("/var/db/bsdeploy/{}/app", config.service);
-                let env_file = format!("/usr/local/etc/bsdeploy/{}/env", config.service);
                 
-                // 1. Ensure app directory exists
-                spinner.set_message(format!("[{}] Ensuring app directory...", host));
-                remote::run(host, &maybe_doas(&format!("mkdir -p {}", app_dir)))?;
-
-                // 2. Sync files
-                spinner.set_message(format!("[{}] Syncing files...", host));
-                remote::sync(host, ".", &app_dir, config.doas)?;
-                
-                // Fix permissions after sync if user is set
-                if let Some(user) = &config.user {
-                     spinner.set_message(format!("[{}] Setting permissions...", host));
-                     remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, app_dir)))?;
+                match config.strategy {
+                    config::Strategy::Host => {
+                        deploy_host(&config, host, &spinner, &restart_service)?;
+                    },
+                    config::Strategy::Jail => {
+                        deploy_jail(&config, host, &spinner)?;
+                    }
                 }
 
-                // 3. Before Start
-                for cmd in &config.before_start {
-                    spinner.set_message(format!("[{}] Running before_start: {}...", host, cmd));
-                    // Use bash instead of sh
-                    let full_cmd = format!(
-                        "bash -c 'source {} && cd {} && {}'",
-                        env_file, app_dir, cmd
-                    );
-                    
-                    // Run before_start as user if set? Usually yes.
-                    let exec_cmd = if let Some(user) = &config.user {
-                        format!("su - {} -c \"{}\"", user, full_cmd.replace("\"", "\\\""))
-                    } else {
-                        full_cmd
-                    };
-
-                    remote::run(host, &maybe_doas(&exec_cmd))?;
-                }
-
-                // 4. Start (via helper)
-                restart_service(host, &spinner)?;
-                
                 spinner.finish_with_message(format!("Deploy complete for {}", host));
                 ui::print_success(&format!("{} deployed successfully", host));
             }

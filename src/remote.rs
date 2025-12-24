@@ -38,6 +38,11 @@ pub fn run_with_output(host: &str, command: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+pub fn get_os_release(host: &str) -> Result<String> {
+    let output = run_with_output(host, "uname -r")?;
+    Ok(output.trim().to_string())
+}
+
 pub fn write_file(host: &str, content: &str, dest_path: &str, use_doas: bool) -> Result<()> {
     debug!("SSH [{}] Writing file: {}", host, dest_path);
     

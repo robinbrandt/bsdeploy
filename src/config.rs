@@ -10,6 +10,9 @@ pub struct Config {
     pub user: Option<String>,
     pub hosts: Vec<String>,
     #[serde(default)]
+    pub strategy: Strategy,
+    pub jail: Option<JailConfig>,
+    #[serde(default)]
     pub packages: Vec<String>,
     #[serde(default)]
     pub env: EnvConfig,
@@ -24,6 +27,26 @@ pub struct Config {
     pub proxy: Option<ProxyConfig>,
     #[serde(default)]
     pub mise: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Strategy {
+    Host,
+    Jail,
+}
+
+impl Default for Strategy {
+    fn default() -> Self {
+        Strategy::Host
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct JailConfig {
+    pub base_version: Option<String>,
+    pub interface: Option<String>,
+    pub ip_range: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
