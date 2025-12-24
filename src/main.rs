@@ -121,6 +121,13 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
     );
     remote::run(host, &build_start_cmd)?;
 
+    // 4.5 Ensure Data Directory Permissions (Must be after start for jexec)
+    if let Some(user) = &config.user {
+        for dir in &config.data_directories {
+            remote::run(host, &format!("{}jexec {} chown -R {} {}", cmd_prefix, jail_info.name, user, dir))?;
+        }
+    }
+
     // 5. Sync App
     spinner.set_message(format!("[{}] Syncing app to jail...", host));
     let app_dir = "/app"; 
@@ -206,53 +213,54 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
 
     // 11. Prune Old Jails
     spinner.set_message(format!("[{}] Pruning old jails...", host));
-    let jls_cmd = format!("jls name | grep '^{}-' || true", config.service);
-    if let Ok(jails_out) = remote::run_with_output(host, &jls_cmd) {
-        let mut jails: Vec<String> = jails_out.lines()
+    
+    // 1. Get all jail directories from filesystem
+    let ls_cmd = format!("ls /usr/local/bsdeploy/jails/ | grep '^{}-' || true", config.service);
+    if let Ok(ls_out) = remote::run_with_output(host, &ls_cmd) {
+        let mut jails: Vec<String> = ls_out.lines()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        jails.sort(); // Sort by timestamp (name format service-timestamp)
+        jails.sort(); // Sort by timestamp
         
-        // Keep last 3 jails
+        // Keep only the last 3 most recent jails
         if jails.len() > 3 {
             let to_remove_count = jails.len() - 3;
             let to_remove = &jails[0..to_remove_count];
+            
             for jname in to_remove {
-                if jname == &jail_info.name { continue; } // Don't remove current
-                spinner.set_message(format!("[{}] Removing old jail {}...", host, jname));
+                if jname == &jail_info.name { continue; }
+                spinner.set_message(format!("[{}] Removing stale/old jail directory {}...", host, jname));
                 
-                // Get IP and Path before stopping
-                let info_cmd = format!("jls -j {} ip4.addr path", jname);
-                if let Ok(info_out) = remote::run_with_output(host, &info_cmd) {
-                    let parts: Vec<&str> = info_out.split_whitespace().collect();
-                    if parts.len() >= 2 {
-                        let jip = parts[0];
-                        let jpath = parts[1];
+                let jpath = format!("/usr/local/bsdeploy/jails/{}", jname);
 
-                        // 1. Stop jail
-                        remote::run(host, &format!("{}jail -r {}", cmd_prefix, jname)).ok();
+                // 1. Try to stop jail if it's running
+                remote::run(host, &format!("{}jail -r {} 2>/dev/null", cmd_prefix, jname)).ok();
 
-                        // 2. Remove IP alias
-                        if jip != "-" && !jip.is_empty() {
-                            remote::run(host, &format!("{}ifconfig lo1 inet {} -alias", cmd_prefix, jip)).ok();
-                        }
-
-                        // 3. Unmount all under jpath
-                        let mount_check = format!("mount | grep '{}' | awk '{{print $3}}'", jpath);
-                        if let Ok(mounts) = remote::run_with_output(host, &mount_check) {
-                            for mnt in mounts.lines().rev() {
-                                if !mnt.trim().is_empty() {
-                                    remote::run(host, &format!("{}umount -f {}", cmd_prefix, mnt.trim())).ok();
-                                }
-                            }
-                        }
-
-                        // 4. Remove dir
-                        remote::run(host, &format!("{}chflags -R noschg {}", cmd_prefix, jpath)).ok();
-                        remote::run(host, &format!("{}rm -rf {}", cmd_prefix, jpath)).ok();
+                // 2. Cleanup IP alias (if we can find it)
+                // We check 'ifconfig lo1' for any IP that isn't the current one or other active ones
+                // This is slightly complex, let's at least try to get the IP from jls if it WAS running
+                let info_cmd = format!("jls -j {} ip4.addr 2>/dev/null || echo '-'", jname);
+                if let Ok(jip) = remote::run_with_output(host, &info_cmd) {
+                    let jip = jip.trim();
+                    if jip != "-" && !jip.is_empty() {
+                        remote::run(host, &format!("{}ifconfig lo1 inet {} -alias 2>/dev/null", cmd_prefix, jip)).ok();
                     }
                 }
+
+                // 3. Unmount all under jpath
+                let mount_check = format!("mount | grep '{}' | awk '{{print $3}}'", jpath);
+                if let Ok(mounts) = remote::run_with_output(host, &mount_check) {
+                    for mnt in mounts.lines().rev() {
+                        if !mnt.trim().is_empty() {
+                            remote::run(host, &format!("{}umount -f {}", cmd_prefix, mnt.trim())).ok();
+                        }
+                    }
+                }
+
+                // 4. Remove dir
+                remote::run(host, &format!("{}chflags -R noschg {}", cmd_prefix, jpath)).ok();
+                remote::run(host, &format!("{}rm -rf {}", cmd_prefix, jpath)).ok();
             }
         }
     }

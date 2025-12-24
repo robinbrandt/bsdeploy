@@ -52,7 +52,7 @@ jail:
     - Ensure `lo1` interface exists.
     - Ensure Base System is fetched (if not, `fetch` and extract).
 2.  **Provision Jail (Green)**:
-    - Generate ID: `fizzy-20241224-1200`.
+    - Generate ID: `myapp-20241224-1200`.
     - Find free IP in range (e.g., `10.0.0.3`).
     - Create directory structure.
     - Mount `base`, `devfs`, and `data_directories`.
