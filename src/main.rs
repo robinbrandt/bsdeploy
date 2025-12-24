@@ -68,7 +68,24 @@ fn main() -> Result<()> {
         };
         
         spinner.set_message(format!("[{}] Stopping service...", host));
-        let _ = remote::run(host, &maybe_doas(&format!("pkill -F {}", pid_file)));
+        // Try to kill and wait for process to exit
+        let stop_cmd = format!(
+            "if [ -f {0} ]; then 
+                pkill -F {0}; 
+                count=0; 
+                while [ -f {0} ] && pkill -0 -F {0} >/dev/null 2>&1; do 
+                    sleep 0.5; 
+                    count=$((count+1)); 
+                    if [ $count -ge 20 ]; then 
+                        pkill -9 -F {0}; 
+                        break; 
+                    fi; 
+                done; 
+            fi",
+            pid_file
+        );
+        // We use 'sh -c' explicitly to handle the shell logic
+        let _ = remote::run(host, &maybe_doas(&format!("sh -c '{}'", stop_cmd)));
 
         for cmd in &config.start {
             spinner.set_message(format!("[{}] Starting: {}...", host, cmd));
@@ -80,8 +97,10 @@ fn main() -> Result<()> {
             }
             
             // Use bash instead of sh for better compatibility (e.g. mise)
+            // We do NOT redirect the outer daemon command to /dev/null so we can see startup errors.
+            // daemon -f closes standard streams upon success.
             let full_cmd = format!(
-                "{} bash -c 'source {} && cd {} && {}' > /dev/null 2>&1 < /dev/null",
+                "{} bash -c 'source {} && cd {} && {}'",
                 daemon_cmd, env_file, app_dir, cmd
             );
             remote::run(host, &maybe_doas(&full_cmd))?;
@@ -279,7 +298,7 @@ fn main() -> Result<()> {
                     
                     // Run before_start as user if set? Usually yes.
                     let exec_cmd = if let Some(user) = &config.user {
-                        format!("su -m {} -c \"{}\"", user, full_cmd.replace("\"", "\\\""))
+                        format!("su - {} -c \"{}\"", user, full_cmd.replace("\"", "\\\""))
                     } else {
                         full_cmd
                     };
