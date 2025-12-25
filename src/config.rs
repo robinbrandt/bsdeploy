@@ -68,7 +68,6 @@ impl Default for Strategy {
 #[derive(Debug, Deserialize, Default)]
 pub struct JailConfig {
     pub base_version: Option<String>,
-    pub interface: Option<String>,
     pub ip_range: Option<String>,
 }
 

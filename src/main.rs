@@ -229,11 +229,8 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
          
          remote::run(host, &format!("{}chown {}:{} {}", cmd_prefix, user, user, jail_run_dir))?;
          remote::run(host, &format!("{}chown {}:{} {}", cmd_prefix, user, user, jail_log_dir))?;
-    } else {
-         let jail_run_dir = format!("{}/var/run", jail_info.path);
-         let jail_log_dir = format!("{}/var/log", jail_info.path);
-         // These usually exist
     }
+    // /var/run and /var/log usually exist by default
 
     // 9. Start Service
     for cmd in &config.start {
