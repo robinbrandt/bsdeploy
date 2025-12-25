@@ -1,0 +1,26 @@
+service: app1
+hosts:
+  - bsd.localdomain
+doas: true
+user: app1
+strategy: jail
+jail:
+  ip_range: "10.0.0.0/24"
+proxy:
+  hostname: app1.local
+  port: 3001
+packages:
+  - curl
+mise:
+  ruby: 3.3.0
+env:
+  clear:
+    - PORT: "3001"
+    - RACK_ENV: production
+  secret: []
+before_start:
+  - bundle config set --local path 'vendor/bundle'
+  - bundle install
+start:
+  - bundle exec ruby app.rb
+data_directories: []
