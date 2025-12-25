@@ -75,7 +75,7 @@ pub fn write_file(host: &str, content: &str, dest_path: &str, use_doas: bool) ->
     Ok(())
 }
 
-pub fn sync(host: &str, src: &str, dest: &str, use_doas: bool) -> Result<()> {
+pub fn sync(host: &str, src: &str, dest: &str, excludes: &[String], use_doas: bool) -> Result<()> {
     debug!("Syncing {} to {}:{}", src, host, dest);
     // Ensure rsync is installed locally
     let mut cmd = Command::new("rsync");
@@ -86,6 +86,10 @@ pub fn sync(host: &str, src: &str, dest: &str, use_doas: bool) -> Result<()> {
        .arg("--exclude=node_modules")
        .arg("--exclude=tmp")
        .arg("--exclude=log");
+    
+    for ex in excludes {
+        cmd.arg(format!("--exclude={}", ex));
+    }
     
     if use_doas {
         cmd.arg("--rsync-path=doas rsync");

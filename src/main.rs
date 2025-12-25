@@ -51,7 +51,23 @@ fn deploy_host(config: &config::Config, host: &str, spinner: &ProgressBar, resta
 
     // 2. Sync files
     spinner.set_message(format!("[{}] Syncing files...", host));
-    remote::sync(host, ".", &app_dir, config.doas)?;
+    
+    let mut excludes = Vec::new();
+    // No data_directories logic for host deployment currently implemented in mounting, 
+    // but if user uses them, we should respect them if they overlap.
+    // For now, pass empty excludes or check config? 
+    // The data_directories config exists.
+    for entry in &config.data_directories {
+        let (host_path, _) = entry.get_paths(); // host_path is what matters on host
+        if host_path.starts_with(&app_dir) {
+             let rel = host_path.strip_prefix(&app_dir).unwrap().trim_start_matches('/');
+             if !rel.is_empty() {
+                 excludes.push(rel.to_string());
+             }
+        }
+    }
+    
+    remote::sync(host, ".", &app_dir, &excludes, config.doas)?;
     
     // Fix permissions after sync if user is set
     if let Some(user) = &config.user {
@@ -139,7 +155,20 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
     let host_app_dir = format!("{}/app", jail_info.path);
     
     remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, host_app_dir))?;
-    remote::sync(host, ".", &host_app_dir, config.doas)?;
+    
+    let mut excludes = Vec::new();
+    for entry in &config.data_directories {
+        let (_, jail_path) = entry.get_paths();
+        // Check if jail_path is inside app_dir (e.g. /app/storage)
+        if jail_path.starts_with(app_dir) {
+             let rel = jail_path.strip_prefix(app_dir).unwrap().trim_start_matches('/');
+             if !rel.is_empty() {
+                 excludes.push(rel.to_string());
+             }
+        }
+    }
+
+    remote::sync(host, ".", &host_app_dir, &excludes, config.doas)?;
     
     if let Some(user) = &config.user {
         remote::run(host, &format!("{}jexec {} chown -R {} {}", cmd_prefix, jail_info.name, user, app_dir))?;
