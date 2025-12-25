@@ -186,7 +186,8 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
     if let Ok(Some(images_parent_ds)) = remote::get_zfs_dataset(host, "/usr/local/bsdeploy/images") {
         let image_ds = format!("{}/{}", images_parent_ds, short_hash);
         if remote::run(host, &format!("zfs list -H -o name {} 2>/dev/null", image_ds)).is_err() {
-            remote::run(host, &maybe_doas(&format!("zfs create {}", image_ds), config.doas))?;
+            // Explicitly set mountpoint to ensure it matches image_path
+            remote::run(host, &maybe_doas(&format!("zfs create -o mountpoint={} {}", image_path, image_ds), config.doas))?;
         }
     } else {
         remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, image_path))?;

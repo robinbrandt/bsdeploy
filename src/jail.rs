@@ -101,8 +101,8 @@ pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image
                 // Find parent dataset for jails
                 if let Ok(Some(jails_parent_dataset)) = remote::get_zfs_dataset(host, "/usr/local/bsdeploy/jails") {
                     let target_dataset = format!("{}/{}", jails_parent_dataset, jail_name);
-                    // Clone it
-                    if remote::run(host, &format!("{}zfs clone {} {}", cmd_prefix, snap_name, target_dataset)).is_ok() {
+                    // Clone it and set explicit mountpoint
+                    if remote::run(host, &format!("{}zfs clone -o mountpoint={} {} {}", cmd_prefix, jail_root, snap_name, target_dataset)).is_ok() {
                         zfs_cloned = true;
                     }
                 }
@@ -111,6 +111,9 @@ pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image
 
         if !zfs_cloned {
             // Fallback to Copy RW dirs from Image (excluding usr/local)
+            // We need to ensure /usr exists
+            remote::run(host, &format!("{}mkdir -p {}/usr", cmd_prefix, jail_root))?;
+            
             let rw_dirs = vec!["etc", "var", "root", "home"];
             for dir in rw_dirs {
                 remote::run(host, &format!("{}cp -a {}/{} {}/", cmd_prefix, img, dir, jail_root))?;
@@ -126,10 +129,8 @@ pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image
         // If we ZFS cloned, we have a full copy of the image.
         
         if zfs_cloned {
-            // If we cloned, /usr/local is already there. 
-            // We should probably make it RO or just leave it.
-            // Nullfs mount over it to be sure it is the same and RO?
-            remote::run(host, &format!("{}mount_nullfs -o ro {}/usr/local {}/usr/local", cmd_prefix, img, jail_root))?;
+            // If we cloned, /usr/local is already there and writable.
+            // We do NOT need to mount it.
         } else {
             remote::run(host, &format!("{}mkdir -p {}/usr/local", cmd_prefix, jail_root))?;
             remote::run(host, &format!("{}mount_nullfs -o ro {}/usr/local {}/usr/local", cmd_prefix, img, jail_root))?;
@@ -166,6 +167,12 @@ pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image
     // Devfs
     remote::run(host, &format!("{}mkdir -p {}/dev", cmd_prefix, jail_root))?;
     remote::run(host, &format!("{}mount -t devfs devfs {}/dev", cmd_prefix, jail_root))?;
+
+    // Fix permissions for tmp
+    remote::run(host, &format!("{}mkdir -p {}/tmp", cmd_prefix, jail_root))?;
+    remote::run(host, &format!("{}chmod 1777 {}/tmp", cmd_prefix, jail_root))?;
+    remote::run(host, &format!("{}mkdir -p {}/var/tmp", cmd_prefix, jail_root))?;
+    remote::run(host, &format!("{}chmod 1777 {}/var/tmp", cmd_prefix, jail_root))?;
 
     // Data Directories (Host -> Jail nullfs RW)
     for entry in data_dirs {

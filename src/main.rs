@@ -190,12 +190,35 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
     );
     remote::run(host, &run_start_cmd)?;
 
+    // 8.5 Ensure Service Dirs in Jail
+    if let Some(user) = &config.user {
+         let jail_run_dir = format!("{}/var/run/bsdeploy/{}", jail_info.path, config.service);
+         let jail_log_dir = format!("{}/var/log/bsdeploy/{}", jail_info.path, config.service);
+         
+         remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, jail_run_dir))?;
+         remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, jail_log_dir))?;
+         
+         remote::run(host, &format!("{}chown {}:{} {}", cmd_prefix, user, user, jail_run_dir))?;
+         remote::run(host, &format!("{}chown {}:{} {}", cmd_prefix, user, user, jail_log_dir))?;
+    } else {
+         let jail_run_dir = format!("{}/var/run", jail_info.path);
+         let jail_log_dir = format!("{}/var/log", jail_info.path);
+         // These usually exist
+    }
+
     // 9. Start Service
     for cmd in &config.start {
         spinner.set_message(format!("[{}] Jail: Starting service...", host));
-        let log_file = "/var/log/service.log";
-        let pid_file = "/var/run/service.pid";
         
+        let (pid_file, log_file) = if let Some(_) = &config.user {
+             (
+                format!("/var/run/bsdeploy/{}/service.pid", config.service),
+                format!("/var/log/bsdeploy/{}/service.log", config.service)
+             )
+        } else {
+             ("/var/run/service.pid".to_string(), "/var/log/service.log".to_string())
+        };
+
         let mut daemon_cmd = format!("daemon -f -p {} -o {}", pid_file, log_file);
         if let Some(u) = &config.user { daemon_cmd.push_str(&format!(" -u {}", u)); }
         
