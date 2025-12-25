@@ -33,6 +33,14 @@ pub fn get_image_hash(config: &config::Config, base_version: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+fn maybe_doas(cmd: &str, doas: bool) -> String {
+    if doas {
+        format!("doas {}", cmd)
+    } else {
+        cmd.to_string()
+    }
+}
+
 pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spinner: &ProgressBar) -> Result<String> {
     let hash = get_image_hash(config, base_version);
     let short_hash = &hash[..12];
@@ -131,7 +139,11 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
 
     // 4. Create User
     if let Some(user) = &config.user {
-        remote::run(host, &format!("{}jexec {} pw useradd -n {} -m -s /usr/local/bin/bash", cmd_prefix, build_jail_name, user))?;
+        // Check if user exists in jail
+        let check_user = format!("{}jexec {} id {}", cmd_prefix, build_jail_name, user);
+        if remote::run(host, &check_user).is_err() {
+            remote::run(host, &format!("{}jexec {} pw useradd -n {} -m -s /usr/local/bin/bash", cmd_prefix, build_jail_name, user))?;
+        }
     }
 
     // 5. Install Mise
@@ -169,7 +181,16 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
 
     // 7. Capture Image
     spinner.set_message(format!("[{}] Image: Saving artifact...", host));
-    remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, image_path))?;
+    
+    // Create ZFS dataset if parent is ZFS
+    if let Ok(Some(images_parent_ds)) = remote::get_zfs_dataset(host, "/usr/local/bsdeploy/images") {
+        let image_ds = format!("{}/{}", images_parent_ds, short_hash);
+        if remote::run(host, &format!("zfs list -H -o name {} 2>/dev/null", image_ds)).is_err() {
+            remote::run(host, &maybe_doas(&format!("zfs create {}", image_ds), config.doas))?;
+        }
+    } else {
+        remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, image_path))?;
+    }
     
     // Copy the RW directories using rsync to be more robust
     // We exclude var/empty because it has schg flag and fails cp/rsync
@@ -198,6 +219,16 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
     // Manually recreate var/empty
     remote::run(host, &format!("{}mkdir -p {}/var/empty", cmd_prefix, image_path))?;
     remote::run(host, &format!("{}chmod 555 {}/var/empty", cmd_prefix, image_path))?;
+
+    // 7.5 Create ZFS Snapshot if available
+    if let Ok(Some(dataset)) = remote::get_zfs_dataset(host, &image_path) {
+        spinner.set_message(format!("[{}] Image: Creating ZFS snapshot...", host));
+        // Check if snapshot already exists
+        let snap_name = format!("{}@base", dataset);
+        if remote::run(host, &format!("zfs list -H -o name {} 2>/dev/null", snap_name)).is_err() {
+            remote::run(host, &format!("{}zfs snapshot {}", cmd_prefix, snap_name))?;
+        }
+    }
 
     // 8. Destroy Build Jail Root
     spinner.set_message(format!("[{}] Image: Cleaning up build jail...", host));

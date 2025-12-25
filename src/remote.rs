@@ -103,3 +103,41 @@ pub fn sync(host: &str, src: &str, dest: &str, use_doas: bool) -> Result<()> {
     }
     Ok(())
 }
+
+/// Detect if a path is on a ZFS dataset and return the dataset name
+pub fn get_zfs_dataset(host: &str, path: &str) -> Result<Option<String>> {
+    // 1. Find the mountpoint for the path using df
+    // df -p is POSIX but might not give exactly what we want. 
+    // On FreeBSD, 'df <path>' shows the mountpoint in the first column if it's a device/dataset.
+    let df_cmd = format!("df {} | tail -n 1 | awk '{{print $1}}'", path);
+    let dataset_candidate = match run_with_output(host, &df_cmd) {
+        Ok(out) => out.trim().to_string(),
+        Err(_) => return Ok(None),
+    };
+
+    if dataset_candidate.is_empty() || dataset_candidate.starts_with('/') {
+        // Not a ZFS dataset (likely a regular path or something else)
+        return Ok(None);
+    }
+
+    // 2. Verify it's a ZFS dataset
+    let zfs_cmd = format!("zfs list -H -o name {} 2>/dev/null", dataset_candidate);
+    let output = match run_with_output(host, &zfs_cmd) {
+        Ok(out) => out,
+        Err(_) => {
+            let doas_cmd = format!("doas zfs list -H -o name {} 2>/dev/null", dataset_candidate);
+            match run_with_output(host, &doas_cmd) {
+                Ok(out) => out,
+                Err(_) => return Ok(None),
+            }
+        }
+    };
+
+    let name = output.trim().to_string();
+    if name.is_empty() {
+        Ok(None)
+    } else {
+        debug!("Detected ZFS dataset {} for path {}", name, path);
+        Ok(Some(name))
+    }
+}

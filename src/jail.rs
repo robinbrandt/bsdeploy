@@ -91,16 +91,49 @@ pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image
     // If image_path is present, copy from image.
     // If not, copy from base (and create empty /usr/local, /home)
     
+    let mut zfs_cloned = false;
     if let Some(img) = image_path {
-        // Copy RW dirs from Image (excluding usr/local)
-        let rw_dirs = vec!["etc", "var", "root", "home"];
-        for dir in rw_dirs {
-            remote::run(host, &format!("{}cp -a {}/{} {}/", cmd_prefix, img, dir, jail_root))?;
+        // Try ZFS clone first
+        if let Ok(Some(img_dataset)) = remote::get_zfs_dataset(host, img) {
+            let snap_name = format!("{}@base", img_dataset);
+            // Check if snapshot exists
+            if remote::run(host, &format!("zfs list -H -o name {} 2>/dev/null", snap_name)).is_ok() {
+                // Find parent dataset for jails
+                if let Ok(Some(jails_parent_dataset)) = remote::get_zfs_dataset(host, "/usr/local/bsdeploy/jails") {
+                    let target_dataset = format!("{}/{}", jails_parent_dataset, jail_name);
+                    // Clone it
+                    if remote::run(host, &format!("{}zfs clone {} {}", cmd_prefix, snap_name, target_dataset)).is_ok() {
+                        zfs_cloned = true;
+                    }
+                }
+            }
+        }
+
+        if !zfs_cloned {
+            // Fallback to Copy RW dirs from Image (excluding usr/local)
+            let rw_dirs = vec!["etc", "var", "root", "home"];
+            for dir in rw_dirs {
+                remote::run(host, &format!("{}cp -a {}/{} {}/", cmd_prefix, img, dir, jail_root))?;
+            }
         }
         
         // MOUNT /usr/local from Image (Read-Only)
-        remote::run(host, &format!("{}mkdir -p {}/usr/local", cmd_prefix, jail_root))?;
-        remote::run(host, &format!("{}mount_nullfs -o ro {}/usr/local {}/usr/local", cmd_prefix, img, jail_root))?;
+        // (Even with ZFS clone, we might want to mount /usr/local RO if it was part of the image dataset)
+        // Actually, if we ZFS cloned the whole image, /usr/local is already there but it's RW.
+        // The plan says we mount /usr/local RO from image. 
+        // If we ZFS cloned, we might have /usr/local in the clone already.
+        // Let's stick to the plan: images store /usr/local. 
+        // If we ZFS cloned, we have a full copy of the image.
+        
+        if zfs_cloned {
+            // If we cloned, /usr/local is already there. 
+            // We should probably make it RO or just leave it.
+            // Nullfs mount over it to be sure it is the same and RO?
+            remote::run(host, &format!("{}mount_nullfs -o ro {}/usr/local {}/usr/local", cmd_prefix, img, jail_root))?;
+        } else {
+            remote::run(host, &format!("{}mkdir -p {}/usr/local", cmd_prefix, jail_root))?;
+            remote::run(host, &format!("{}mount_nullfs -o ro {}/usr/local {}/usr/local", cmd_prefix, img, jail_root))?;
+        }
         
     } else {
         // Legacy/Empty Init

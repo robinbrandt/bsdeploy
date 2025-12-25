@@ -283,7 +283,11 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
                     }
                 }
 
-                // 4. Remove dir
+                // 4. Remove dir or ZFS dataset
+                if let Ok(Some(dataset)) = remote::get_zfs_dataset(host, &jpath) {
+                    remote::run(host, &format!("{}zfs destroy -r {}", cmd_prefix, dataset)).ok();
+                }
+                
                 remote::run(host, &format!("{}chflags -R noschg {}", cmd_prefix, jpath)).ok();
                 remote::run(host, &format!("{}rm -rf {}", cmd_prefix, jpath)).ok();
             }
@@ -412,6 +416,37 @@ fn main() -> Result<()> {
                     spinner.set_message(format!("[{}] Installing user packages...", host));
                     let pkgs = config.packages.join(" ");
                     remote::run(host, &maybe_doas(&format!("pkg install -y {}", pkgs), config.doas))?;
+                }
+
+                // 3.5 Setup ZFS if available
+                if let Ok(Some(root_dataset)) = remote::get_zfs_dataset(host, "/") {
+                    spinner.set_message(format!("[{}] ZFS detected (dataset: {}). Setting up datasets...", host, root_dataset));
+                    
+                    // We want to create zroot/bsdeploy, zroot/bsdeploy/base, etc.
+                    // But we need to know the pool name or parent.
+                    let pool = root_dataset.split('/').next().unwrap_or("zroot");
+                    let bsdeploy_root_dataset = format!("{}/bsdeploy", pool);
+                    
+                    let datasets = vec![
+                        bsdeploy_root_dataset.clone(),
+                        format!("{}/base", bsdeploy_root_dataset),
+                        format!("{}/images", bsdeploy_root_dataset),
+                        format!("{}/jails", bsdeploy_root_dataset),
+                    ];
+                    
+                    for ds in datasets {
+                        let check_ds = remote::run(host, &format!("zfs list -H -o name {}", ds));
+                        if check_ds.is_err() {
+                            // Determine mountpoint
+                            let mountpoint = if ds == bsdeploy_root_dataset {
+                                "/usr/local/bsdeploy".to_string()
+                            } else {
+                                format!("/usr/local/bsdeploy/{}", ds.split('/').last().unwrap())
+                            };
+                            
+                            remote::run(host, &maybe_doas(&format!("zfs create -o mountpoint={} {}", mountpoint, ds), config.doas)).ok();
+                        }
+                    }
                 }
 
                 // 4. Install Mise and Tools
@@ -601,7 +636,11 @@ fn main() -> Result<()> {
                             }
                         }
 
-                        // Remove jail dir
+                        // Remove jail dir or ZFS dataset
+                        if let Ok(Some(dataset)) = remote::get_zfs_dataset(host, &jpath) {
+                            remote::run(host, &format!("{}zfs destroy -r {}", cmd_prefix, dataset)).ok();
+                        }
+                        
                         remote::run(host, &format!("{}chflags -R noschg {}", cmd_prefix, jpath)).ok();
                         remote::run(host, &format!("{}rm -rf {}", cmd_prefix, jpath)).ok();
                     }
