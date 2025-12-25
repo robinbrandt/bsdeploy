@@ -146,7 +146,7 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
 
         // Install Mise
         if !config.mise.is_empty() {
-            spinner.set_message(format!("[{}] Image: Installing Mise runtimes...", host));
+            spinner.set_message(format!("[{}] Image: Installing Mise and build dependencies...", host));
             remote::run(host, &format!("{}pkg -j {} install -y mise gmake gcc python3 pkgconf", cmd_prefix, build_jail_name))?;
             for (tool, version) in &config.mise {
                  spinner.set_message(format!("[{}] Image: Building {}@{}...", host, tool, version));
