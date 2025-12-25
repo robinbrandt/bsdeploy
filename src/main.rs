@@ -29,6 +29,8 @@ enum Commands {
     Deploy,
     /// Restart the application without deploying code
     Restart,
+    /// Destroy all resources associated with the service on the remote hosts
+    Destroy,
 }
 
 fn maybe_doas(cmd: &str, doas: bool) -> String {
@@ -123,8 +125,11 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
 
     // 4.5 Ensure Data Directory Permissions (Must be after start for jexec)
     if let Some(user) = &config.user {
-        for dir in &config.data_directories {
-            remote::run(host, &format!("{}jexec {} chown -R {} {}", cmd_prefix, jail_info.name, user, dir))?;
+        for entry in &config.data_directories {
+            let (_, jail_path) = entry.get_paths();
+            if !jail_path.is_empty() {
+                remote::run(host, &format!("{}jexec {} chown -R {} {}", cmd_prefix, jail_info.name, user, jail_path))?;
+            }
         }
     }
 
@@ -199,17 +204,37 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
         remote::run(host, &format!("{}jexec {} {}", cmd_prefix, jail_info.name, full_cmd))?;
     }
 
-    // 10. Update Proxy
-    if let Some(proxy) = &config.proxy {
-         spinner.set_message(format!("[{}] Switching traffic to {}...", host, jail_info.ip));
-         let proxy_conf_content = format!(
-            "{} {{\n    reverse_proxy {}:{} \n}}\n", 
-            proxy.hostname, jail_info.ip, proxy.port
-        );
-        let caddy_conf_path = format!("/usr/local/etc/caddy/conf.d/{}.caddy", config.service);
-        remote::write_file(host, &proxy_conf_content, &caddy_conf_path, config.doas)?;
-        remote::run(host, &format!("{}service caddy reload", cmd_prefix))?;
-    }
+        // 10. Update Proxy
+
+        if let Some(proxy) = &config.proxy {
+
+             spinner.set_message(format!("[{}] Switching traffic to {}...", host, jail_info.ip));
+
+             let hostname = if proxy.tls {
+
+                proxy.hostname.clone()
+
+             } else {
+
+                format!("http://{}", proxy.hostname)
+
+             };
+
+             let proxy_conf_content = format!(
+
+                "{} {{\n    reverse_proxy {}:{}\n}}\n", 
+
+                hostname, jail_info.ip, proxy.port
+
+            );
+
+            let caddy_conf_path = format!("/usr/local/etc/caddy/conf.d/{}.caddy", config.service);
+
+            remote::write_file(host, &proxy_conf_content, &caddy_conf_path, config.doas)?;
+
+            remote::run(host, &format!("{}service caddy reload", cmd_prefix))?;
+
+        }
 
     // 11. Prune Old Jails
     spinner.set_message(format!("[{}] Pruning old jails...", host));
@@ -422,7 +447,8 @@ fn main() -> Result<()> {
                 remote::run(host, &maybe_doas(&format!("mkdir -p {}", config_dir), config.doas))?;
 
                 for dir in &config.data_directories {
-                    remote::run(host, &maybe_doas(&format!("mkdir -p {}", dir), config.doas))?;
+                    let (host_path, _) = dir.get_paths();
+                    remote::run(host, &maybe_doas(&format!("mkdir -p {}", host_path), config.doas))?;
                 }
                 
                 // Create user-specific run/log dirs if needed
@@ -437,7 +463,8 @@ fn main() -> Result<()> {
                     // Also chown app_dir and data directories
                     remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, format!("/var/db/bsdeploy/{}", config.service)), config.doas))?;
                     for dir in &config.data_directories {
-                        remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, dir), config.doas))?;
+                        let (host_path, _) = dir.get_paths();
+                        remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, host_path), config.doas))?;
                     }
                 }
 
@@ -480,10 +507,14 @@ fn main() -> Result<()> {
 
                 // Proxy Config
                 if let Some(proxy) = &config.proxy {
+                    let hostname = if proxy.tls {
+                        proxy.hostname.clone()
+                    } else {
+                        format!("http://{}", proxy.hostname)
+                    };
                     let proxy_conf_content = format!(
-                        "{} {{\n    reverse_proxy :{}
-}}\n", 
-                        proxy.hostname, proxy.port
+                        "{} {{\n    reverse_proxy :{}\n}}\n", 
+                        hostname, proxy.port
                     );
                     let proxy_conf_path = format!("{}/{}.caddy", caddy_conf_d, config.service);
                     remote::write_file(host, &proxy_conf_content, &proxy_conf_path, config.doas)?;
@@ -526,6 +557,79 @@ fn main() -> Result<()> {
                 
                 spinner.finish_with_message(format!("Restart complete for {}", host));
                 ui::print_success(&format!("{} restarted successfully", host));
+            }
+        }
+        Commands::Destroy => {
+            ui::print_step(&format!("Destroying all resources for service {} on {} hosts", config.service, config.hosts.len()));
+            
+            for host in &config.hosts {
+                let spinner = ui::create_spinner(&format!("Destroying resources on {}", host));
+                let cmd_prefix = if config.doas { "doas " } else { "" };
+
+                // 1. Find and Remove Jails & IP Aliases
+                spinner.set_message(format!("[{}] Removing jails and networking...", host));
+                
+                // Get list of jail directories from filesystem
+                let ls_cmd = format!("ls /usr/local/bsdeploy/jails/ | grep '^{}-' || true", config.service);
+                if let Ok(ls_out) = remote::run_with_output(host, &ls_cmd) {
+                    for jname in ls_out.lines().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                        spinner.set_message(format!("[{}] Cleaning up jail {}...", host, jname));
+                        
+                        let jpath = format!("/usr/local/bsdeploy/jails/{}", jname);
+
+                        // Try to get IP before stopping
+                        let info_cmd = format!("jls -j {} ip4.addr 2>/dev/null || echo '-'", jname);
+                        if let Ok(jip) = remote::run_with_output(host, &info_cmd) {
+                            let jip = jip.trim();
+                            
+                            // Stop jail
+                            remote::run(host, &format!("{}jail -r {} 2>/dev/null", cmd_prefix, jname)).ok();
+
+                            // Remove IP alias
+                            if jip != "-" && !jip.is_empty() {
+                                remote::run(host, &format!("{}ifconfig lo1 inet {} -alias 2>/dev/null", cmd_prefix, jip)).ok();
+                            }
+                        }
+
+                        // Unmount everything under jpath
+                        let mount_check = format!("mount | grep '{}' | awk '{{print $3}}'", jpath);
+                        if let Ok(mounts) = remote::run_with_output(host, &mount_check) {
+                            for mnt in mounts.lines().rev() {
+                                if !mnt.trim().is_empty() {
+                                    remote::run(host, &format!("{}umount -f {}", cmd_prefix, mnt.trim())).ok();
+                                }
+                            }
+                        }
+
+                        // Remove jail dir
+                        remote::run(host, &format!("{}chflags -R noschg {}", cmd_prefix, jpath)).ok();
+                        remote::run(host, &format!("{}rm -rf {}", cmd_prefix, jpath)).ok();
+                    }
+                }
+
+                // 2. Remove Caddy Proxy Config
+                spinner.set_message(format!("[{}] Removing proxy configuration...", host));
+                let caddy_conf = format!("/usr/local/etc/caddy/conf.d/{}.caddy", config.service);
+                remote::run(host, &format!("{}rm -f {}", cmd_prefix, caddy_conf)).ok();
+                remote::run(host, &format!("{}service caddy reload", cmd_prefix)).ok();
+
+                // 3. Remove Service Directories (Env, App, Run, Log)
+                spinner.set_message(format!("[{}] Removing service directories...", host));
+                let dirs = vec![
+                    format!("/usr/local/etc/bsdeploy/{}", config.service),
+                    format!("/var/db/bsdeploy/{}", config.service),
+                    format!("/var/run/bsdeploy/{}", config.service),
+                    format!("/var/log/bsdeploy/{}", config.service),
+                ];
+                for dir in dirs {
+                    remote::run(host, &format!("{}rm -rf {}", cmd_prefix, dir)).ok();
+                }
+
+                // 4. Note: We keep images because they might be shared by other apps with same hashes.
+                // If the user wants to clear ALL images, they can use setup or manual cleanup.
+
+                spinner.finish_with_message(format!("Resources destroyed for {}", host));
+                ui::print_success(&format!("{} resources cleaned up", host));
             }
         }
     }

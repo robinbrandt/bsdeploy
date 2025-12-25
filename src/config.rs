@@ -21,12 +21,35 @@ pub struct Config {
     #[serde(default)]
     pub start: Vec<String>,
     #[serde(default)]
-    pub data_directories: Vec<String>,
+    pub data_directories: Vec<DataDirectory>,
     #[serde(default)]
     pub doas: bool,
     pub proxy: Option<ProxyConfig>,
     #[serde(default)]
     pub mise: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum DataDirectory {
+    Simple(String),
+    Mapping(HashMap<String, String>),
+}
+
+impl DataDirectory {
+    pub fn get_paths(&self) -> (String, String) {
+        match self {
+            DataDirectory::Simple(path) => (path.clone(), path.clone()),
+            DataDirectory::Mapping(map) => {
+                // Take the first entry
+                if let Some((host, jail)) = map.iter().next() {
+                    (host.clone(), jail.clone())
+                } else {
+                    ("".to_string(), "".to_string())
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -53,6 +76,12 @@ pub struct JailConfig {
 pub struct ProxyConfig {
     pub hostname: String,
     pub port: u16,
+    #[serde(default = "default_true")]
+    pub tls: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Default)]

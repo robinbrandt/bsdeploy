@@ -69,7 +69,7 @@ pub struct JailInfo {
     pub ip: String,
 }
 
-pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image_path: Option<&str>, data_dirs: &[String], doas: bool) -> Result<JailInfo> {
+pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image_path: Option<&str>, data_dirs: &[crate::config::DataDirectory], doas: bool) -> Result<JailInfo> {
     let timestamp = Local::now().format("%Y%m%d-%H%M%S");
     let jail_name = format!("{}-{}", service, timestamp);
     let jail_root = format!("/usr/local/bsdeploy/jails/{}", jail_name);
@@ -135,14 +135,18 @@ pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image
     remote::run(host, &format!("{}mount -t devfs devfs {}/dev", cmd_prefix, jail_root))?;
 
     // Data Directories (Host -> Jail nullfs RW)
-    for dir in data_dirs {
+    for entry in data_dirs {
+        let (host_path, jail_path) = entry.get_paths();
+        if host_path.is_empty() || jail_path.is_empty() { continue; }
+
         // Ensure host dir exists
-        remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, dir))?;
-        // Ensure jail mountpoint exists
-        let jail_mount_path = format!("{}{}", jail_root, dir);
-        remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, jail_mount_path))?;
+        remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, host_path))?;
+        // Ensure jail mountpoint exists (absolute path relative to jail root)
+        // Strip leading slash from jail_path if it exists to join with jail_root
+        let target_in_jail = format!("{}/{}", jail_root, jail_path.trim_start_matches('/'));
+        remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, target_in_jail))?;
         // Mount
-        remote::run(host, &format!("{}mount_nullfs {} {}", cmd_prefix, dir, jail_mount_path))?;
+        remote::run(host, &format!("{}mount_nullfs {} {}", cmd_prefix, host_path, target_in_jail))?;
     }
 
     // 3. Network Setup
