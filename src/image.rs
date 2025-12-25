@@ -192,6 +192,14 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
     } else {
         remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, image_path))?;
     }
+
+    // Populate Image with Base System
+    spinner.set_message(format!("[{}] Image: Populating base system...", host));
+    let rsync_base_cmd = format!(
+        "{}rsync -a --exclude 'var/empty' {}/ {}/", 
+        cmd_prefix, base_dir, image_path
+    );
+    remote::run(host, &rsync_base_cmd)?;
     
     // Copy the RW directories using rsync to be more robust
     // We exclude var/empty because it has schg flag and fails cp/rsync

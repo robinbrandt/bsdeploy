@@ -11,6 +11,7 @@ proxy:
   port: 3001
 packages:
   - curl
+  - libyaml
 mise:
   ruby: 3.3.0
 env:
@@ -23,4 +24,5 @@ before_start:
   - bundle install
 start:
   - bundle exec ruby app.rb
-data_directories: []
+data_directories:
+  - /var/bsdeploy/app1/storage: /app/storage
