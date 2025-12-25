@@ -34,31 +34,66 @@ fn find_free_ip(host: &str, subnet: &str, _doas: bool) -> Result<String> {
 }
 
 pub fn ensure_base(host: &str, version: &str, doas: bool) -> Result<()> {
-    let base_dir = format!("/usr/local/bsdeploy/base/{}", version);
+    let base_parent_dir = "/usr/local/bsdeploy/base";
+    let base_dir = format!("{}/{}", base_parent_dir, version);
     let cmd_prefix = if doas { "doas " } else { "" };
     
-    // Check if base exists (checking /bin inside)
-    let check_cmd = format!("test -d {}/bin", base_dir);
-    if remote::run(host, &format!("{}{}", cmd_prefix, check_cmd)).is_ok() {
-        return Ok(());
+    // Check if base is fully ready (marker or just existence)
+    // We check for @clean snapshot if ZFS, or just directory if not.
+    let is_zfs = remote::get_zfs_dataset(host, base_parent_dir).ok().flatten().is_some();
+    
+    if is_zfs {
+        if let Ok(Some(ds)) = remote::get_zfs_dataset(host, &base_dir) {
+            // Dataset exists, check for snapshot
+            if remote::run(host, &format!("zfs list -H -o name {}@clean 2>/dev/null", ds)).is_ok() {
+                return Ok(());
+            }
+        }
+    } else {
+        // Legacy check
+        if remote::run(host, &format!("test -d {}/bin", base_dir)).is_ok() {
+            return Ok(());
+        }
     }
 
-    // Create directory
-    remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, base_dir))?;
+    // Create directory or dataset
+    if is_zfs {
+         if let Ok(Some(parent_ds)) = remote::get_zfs_dataset(host, base_parent_dir) {
+             let target_ds = format!("{}/{}", parent_ds, version);
+             // Create dataset if not exists
+             if remote::run(host, &format!("zfs list -H -o name {} 2>/dev/null", target_ds)).is_err() {
+                 remote::run(host, &format!("{}zfs create -o mountpoint={} {}", cmd_prefix, base_dir, target_ds))?;
+             }
+         }
+    } else {
+        remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, base_dir))?;
+    }
 
-    // Fetch and extract
-    // We assume 14.1-RELEASE format.
-    // Defaulting to amd64.
-    let url = format!("https://download.freebsd.org/ftp/releases/amd64/{}/base.txz", version);
-    
-    // We stream fetch into tar to save disk space and time
-    // Note: This might take a while, so we rely on the caller to show a spinner/message.
-    let fetch_cmd = format!(
-        "{}fetch -o - {} | {}tar -xf - -C {}", 
-        cmd_prefix, url, cmd_prefix, base_dir
-    );
+    // Fetch and extract if empty (checking /bin)
+    if remote::run(host, &format!("test -d {}/bin", base_dir)).is_err() {
+        // We assume 14.1-RELEASE format.
+        // Defaulting to amd64.
+        let url = format!("https://download.freebsd.org/ftp/releases/amd64/{}/base.txz", version);
+        
+        let fetch_cmd = format!(
+            "{}fetch -o - {} | {}tar -xf - -C {}", 
+            cmd_prefix, url, cmd_prefix, base_dir
+        );
 
-    remote::run(host, &fetch_cmd).with_context(|| format!("Failed to fetch and extract base system version {}", version))?;
+        remote::run(host, &fetch_cmd).with_context(|| format!("Failed to fetch and extract base system version {}", version))?;
+        
+        // Copy timezone and resolv.conf for template completeness (though we copy resolv.conf later too)
+        remote::run(host, &format!("{}cp /etc/localtime {}/etc/localtime", cmd_prefix, base_dir)).ok();
+    }
+
+    // Create ZFS Snapshot if applicable
+    if is_zfs {
+        if let Ok(Some(ds)) = remote::get_zfs_dataset(host, &base_dir) {
+             if remote::run(host, &format!("zfs list -H -o name {}@clean 2>/dev/null", ds)).is_err() {
+                 remote::run(host, &format!("{}zfs snapshot {}@clean", cmd_prefix, ds))?;
+             }
+        }
+    }
 
     Ok(())
 }

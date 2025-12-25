@@ -72,19 +72,41 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
     spinner.set_message(format!("[{}] Building image {} (in-place)...", host, short_hash));
 
     // 1. Create Image Dataset & Populate Base
+    let base_dir = format!("/usr/local/bsdeploy/base/{}", base_version);
+    let mut zfs_cloned_base = false;
+
     if let Ok(Some(images_parent_ds)) = remote::get_zfs_dataset(host, "/usr/local/bsdeploy/images") {
          let image_ds = format!("{}/{}", images_parent_ds, short_hash);
-         remote::run(host, &maybe_doas(&format!("zfs create -o mountpoint={} {}", image_path, image_ds), config.doas))?;
+         
+         // Check if Base has @clean snapshot
+         let mut base_snap = String::new();
+         if let Ok(Some(base_ds)) = remote::get_zfs_dataset(host, &base_dir) {
+             let snap = format!("{}@clean", base_ds);
+             if remote::run(host, &format!("zfs list -H -o name {} 2>/dev/null", snap)).is_ok() {
+                 base_snap = snap;
+             }
+         }
+
+         if !base_snap.is_empty() {
+             // THIN IMAGE: Clone from Base
+             spinner.set_message(format!("[{}] Image: Cloning base system (Thin)...", host));
+             remote::run(host, &maybe_doas(&format!("zfs clone -o mountpoint={} {} {}", image_path, base_snap, image_ds), config.doas))?;
+             zfs_cloned_base = true;
+         } else {
+             // THICK IMAGE: Create empty + Rsync
+             remote::run(host, &maybe_doas(&format!("zfs create -o mountpoint={} {}", image_path, image_ds), config.doas))?;
+         }
     } else {
          remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, image_path))?;
     }
 
-    spinner.set_message(format!("[{}] Image: Populating base system...", host));
-    let base_dir = format!("/usr/local/bsdeploy/base/{}", base_version);
-    remote::run(host, &format!("{}rsync -a --exclude 'var/empty' {}/ {}", cmd_prefix, base_dir, image_path))?;
-    // Fix var/empty permissions (rsync excludes it due to flags)
-    remote::run(host, &format!("{}mkdir -p {}/var/empty", cmd_prefix, image_path))?;
-    remote::run(host, &format!("{}chmod 555 {}/var/empty", cmd_prefix, image_path))?;
+    if !zfs_cloned_base {
+        spinner.set_message(format!("[{}] Image: Populating base system (Thick)...", host));
+        remote::run(host, &format!("{}rsync -a --exclude 'var/empty' {}/ {}", cmd_prefix, base_dir, image_path))?;
+        // Fix var/empty permissions (rsync excludes it due to flags)
+        remote::run(host, &format!("{}mkdir -p {}/var/empty", cmd_prefix, image_path))?;
+        remote::run(host, &format!("{}chmod 555 {}/var/empty", cmd_prefix, image_path))?;
+    }
 
     // 2. Setup Build Jail (Directly on image_path)
     let build_jail_name = format!("build-{}", short_hash);
