@@ -80,7 +80,8 @@ pub fn sync(host: &str, src: &str, dest: &str, excludes: &[String], use_doas: bo
     // Ensure rsync is installed locally
     let mut cmd = Command::new("rsync");
     cmd.arg("-az")
-       .arg("--delete")
+       .arg("--delete-delay")      // Delete after transfer, not during (safer)
+       .arg("--timeout=30")         // Prevent hanging on network issues
        .arg("--filter=:- .gitignore")
        .arg("--exclude=.git")
        .arg("--exclude=node_modules")

@@ -101,10 +101,11 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
     }
 
     if !zfs_cloned_base {
-        spinner.set_message(format!("[{}] Image: Populating base system (Thick)...", host));
-        remote::run(host, &format!("{}rsync -a --exclude 'var/empty' {}/ {}", cmd_prefix, base_dir, image_path))?;
-        // Fix var/empty permissions (rsync excludes it due to flags)
-        remote::run(host, &format!("{}mkdir -p {}/var/empty", cmd_prefix, image_path))?;
+        spinner.set_message(format!("[{}] Image: Populating base system with hardlinks (UFS-optimized)...", host));
+        // Use cp -al for instant hardlinked copy instead of slow rsync
+        // This shares disk space with base system until files are modified
+        remote::run(host, &format!("{}cp -al {}/ {}", cmd_prefix, base_dir, image_path))?;
+        // Fix var/empty permissions (needs to be created with specific perms)
         remote::run(host, &format!("{}chmod 555 {}/var/empty", cmd_prefix, image_path))?;
     }
 

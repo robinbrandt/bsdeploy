@@ -1,6 +1,7 @@
 use crate::remote;
 use anyhow::{Context, Result, anyhow};
 use chrono::Local;
+use std::collections::HashSet;
 
 fn find_free_ip(host: &str, subnet: &str, _doas: bool) -> Result<String> {
     // Default 10.0.0.0/24
@@ -18,7 +19,8 @@ fn find_free_ip(host: &str, subnet: &str, _doas: bool) -> Result<String> {
     // Get current aliases on lo1
     let cmd = "ifconfig lo1 | grep 'inet ' | awk '{print $2}'";
     let output = remote::run_with_output(host, cmd)?;
-    let used_ips: Vec<String> = output.lines().map(|s| s.trim().to_string()).collect();
+    // Use HashSet for O(1) lookup instead of O(n) Vec::contains
+    let used_ips: HashSet<String> = output.lines().map(|s| s.trim().to_string()).collect();
 
     for i in 2..255 {
         let candidate = format!("{}.{}", prefix, i);
@@ -146,12 +148,13 @@ pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image
 
         if !zfs_cloned {
             // Fallback to Copy RW dirs from Image (excluding usr/local)
-            // We need to ensure /usr exists
+            // Use hardlinks to save disk space - identical files shared until modified
             remote::run(host, &format!("{}mkdir -p {}/usr", cmd_prefix, jail_root))?;
-            
+
             let rw_dirs = vec!["etc", "var", "root", "home"];
             for dir in rw_dirs {
-                remote::run(host, &format!("{}cp -a {}/{} {}/", cmd_prefix, img, dir, jail_root))?;
+                // Use cp -al for hardlinked copy (UFS-optimized)
+                remote::run(host, &format!("{}cp -al {}/{} {}/", cmd_prefix, img, dir, jail_root))?;
             }
         }
         

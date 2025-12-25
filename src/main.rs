@@ -498,8 +498,9 @@ fn main() -> Result<()> {
                     }
                 }
 
-                // 4. Install Mise and Tools
-                if !config.mise.is_empty() {
+                // 4. Install Mise and Tools (only for Host strategy)
+                // For Jail strategy, mise is installed inside jails during image building
+                if !config.mise.is_empty() && config.strategy == config::Strategy::Host {
                     spinner.set_message(format!("[{}] Installing Mise and build deps...", host));
                     // Install build deps: gmake, gcc, python3, pkgconf
                     remote::run(host, &maybe_doas("pkg install -y mise gmake gcc python3 pkgconf", config.doas))?;
@@ -508,7 +509,7 @@ fn main() -> Result<()> {
                         spinner.set_message(format!("[{}] Installing {}@{}...", host, tool, version));
                         // Set environment variables to help compilation on FreeBSD
                         let cmd = format!("export CC=gcc CXX=g++ MAKE=gmake && mise use --global {}@{}", tool, version);
-                        
+
                         // Run as user if configured, otherwise as doas/root
                         let exec_cmd = if let Some(user) = &config.user {
                              // Use su - to run as user with clean environment (loading .profile etc if needed, though mise use global writes to config)
