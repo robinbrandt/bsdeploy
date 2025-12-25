@@ -149,19 +149,21 @@ pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image
     }
 
     // Dirs to create for mounting
-    let root_mounts = vec!["bin", "lib", "libexec", "sbin"];
-    for dir in root_mounts {
-         remote::run(host, &format!("{}mkdir -p {}/{}", cmd_prefix, jail_root, dir))?;
-         remote::run(host, &format!("{}mount_nullfs -o ro {}/{} {}/{}", cmd_prefix, base_dir, dir, jail_root, dir))?;
-    }
+    if !zfs_cloned {
+        let root_mounts = vec!["bin", "lib", "libexec", "sbin"];
+        for dir in root_mounts {
+             remote::run(host, &format!("{}mkdir -p {}/{}", cmd_prefix, jail_root, dir))?;
+             remote::run(host, &format!("{}mount_nullfs -o ro {}/{} {}/{}", cmd_prefix, base_dir, dir, jail_root, dir))?;
+        }
 
-    // Handle /usr mounts (skipping local)
-    let usr_mounts = vec!["bin", "include", "lib", "lib32", "libdata", "libexec", "sbin", "share"];
-    for dir in usr_mounts {
-         if remote::run(host, &format!("test -d {}/usr/{}", base_dir, dir)).is_ok() {
-             remote::run(host, &format!("{}mkdir -p {}/usr/{}", cmd_prefix, jail_root, dir))?;
-             remote::run(host, &format!("{}mount_nullfs -o ro {}/usr/{} {}/usr/{}", cmd_prefix, base_dir, dir, jail_root, dir))?;
-         }
+        // Handle /usr mounts (skipping local)
+        let usr_mounts = vec!["bin", "include", "lib", "lib32", "libdata", "libexec", "sbin", "share"];
+        for dir in usr_mounts {
+             if remote::run(host, &format!("test -d {}/usr/{}", base_dir, dir)).is_ok() {
+                 remote::run(host, &format!("{}mkdir -p {}/usr/{}", cmd_prefix, jail_root, dir))?;
+                 remote::run(host, &format!("{}mount_nullfs -o ro {}/usr/{} {}/usr/{}", cmd_prefix, base_dir, dir, jail_root, dir))?;
+             }
+        }
     }
     
     // Devfs
