@@ -285,7 +285,48 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
 
         }
 
-    // 11. Prune Old Jails
+    // 11. Stop processes in existing jails
+    spinner.set_message(format!("[{}] Stopping processes in old jails...", host));
+
+    let ls_cmd = format!("ls /usr/local/bsdeploy/jails/ | grep '^{}-' || true", config.service);
+    if let Ok(ls_out) = remote::run_with_output(host, &ls_cmd) {
+        let existing_jails: Vec<String> = ls_out.lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != &jail_info.name)
+            .collect();
+
+        for jname in existing_jails {
+            spinner.set_message(format!("[{}] Stopping service in jail {}...", host, jname));
+
+            let pid_file = if config.user.is_some() {
+                format!("/var/run/bsdeploy/{}/service.pid", config.service)
+            } else {
+                "/var/run/service.pid".to_string()
+            };
+
+            // Try to stop the process gracefully, then forcefully if needed
+            let stop_cmd = format!(
+                "if [ -f {0} ]; then \
+                    pkill -F {0}; \
+                    count=0; \
+                    while [ -f {0} ] && pkill -0 -F {0} >/dev/null 2>&1; do \
+                        sleep 0.5; \
+                        count=$((count+1)); \
+                        if [ $count -ge 20 ]; then \
+                            pkill -9 -F {0}; \
+                            break; \
+                        fi; \
+                    done; \
+                fi",
+                pid_file
+            );
+
+            let exec_cmd = format!("{}jexec {} sh -c '{}'", cmd_prefix, jname, stop_cmd);
+            remote::run(host, &exec_cmd).ok();
+        }
+    }
+
+    // 12. Prune Old Jails
     spinner.set_message(format!("[{}] Pruning old jails...", host));
     
     // 1. Get all jail directories from filesystem
