@@ -62,7 +62,7 @@ fn deploy_host(config: &config::Config, host: &str, spinner: &ProgressBar, resta
         if host_path.starts_with(&app_dir) {
              let rel = host_path.strip_prefix(&app_dir).unwrap().trim_start_matches('/');
              if !rel.is_empty() {
-                 excludes.push(rel.to_string());
+                 excludes.push(format!("/{}", rel));
              }
         }
     }
@@ -163,7 +163,7 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
         if jail_path.starts_with(app_dir) {
              let rel = jail_path.strip_prefix(app_dir).unwrap().trim_start_matches('/');
              if !rel.is_empty() {
-                 excludes.push(rel.to_string());
+                 excludes.push(format!("/{}", rel));
              }
         }
     }
