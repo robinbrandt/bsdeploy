@@ -23,12 +23,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize a new configuration file
+    Init,
     /// Setup the remote hosts
     Setup,
     /// Deploy the application
     Deploy,
-    /// Restart the application without deploying code
-    Restart,
     /// Destroy all resources associated with the service on the remote hosts
     Destroy,
 }
@@ -39,65 +39,6 @@ fn maybe_doas(cmd: &str, doas: bool) -> String {
     } else {
         cmd.to_string()
     }
-}
-
-fn deploy_host(config: &config::Config, host: &str, spinner: &ProgressBar, restart_service: &dyn Fn(&str, &ProgressBar) -> Result<()>) -> Result<()> {
-    let app_dir = format!("/var/db/bsdeploy/{}/app", config.service);
-    let env_file = format!("/usr/local/etc/bsdeploy/{}/env", config.service);
-    
-    // 1. Ensure app directory exists
-    spinner.set_message(format!("[{}] Ensuring app directory...", host));
-    remote::run(host, &maybe_doas(&format!("mkdir -p {}", app_dir), config.doas))?;
-
-    // 2. Sync files
-    spinner.set_message(format!("[{}] Syncing files...", host));
-    
-    let mut excludes = Vec::new();
-    // No data_directories logic for host deployment currently implemented in mounting, 
-    // but if user uses them, we should respect them if they overlap.
-    // For now, pass empty excludes or check config? 
-    // The data_directories config exists.
-    for entry in &config.data_directories {
-        let (host_path, _) = entry.get_paths(); // host_path is what matters on host
-        if host_path.starts_with(&app_dir) {
-             let rel = host_path.strip_prefix(&app_dir).unwrap().trim_start_matches('/');
-             if !rel.is_empty() {
-                 excludes.push(format!("/{}", rel));
-             }
-        }
-    }
-    
-    remote::sync(host, ".", &app_dir, &excludes, config.doas)?;
-    
-    // Fix permissions after sync if user is set
-    if let Some(user) = &config.user {
-            spinner.set_message(format!("[{}] Setting permissions...", host));
-            remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, app_dir), config.doas))?;
-    }
-
-    // 3. Before Start
-    for cmd in &config.before_start {
-        spinner.set_message(format!("[{}] Running before_start: {}...", host, cmd));
-        // Use bash instead of sh
-        let full_cmd = format!(
-            "bash -c 'source {} && cd {} && {}'",
-            env_file, app_dir, cmd
-        );
-        
-        // Run before_start as user if set? Usually yes.
-        let exec_cmd = if let Some(user) = &config.user {
-            format!("su - {} -c \"{}\"", user, full_cmd.replace("\"", "\\\""))
-        } else {
-            full_cmd
-        };
-
-        remote::run(host, &maybe_doas(&exec_cmd, config.doas))?;
-    }
-
-    // 4. Start (via helper)
-    restart_service(host, spinner)?;
-
-    Ok(())
 }
 
 fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Result<()> {
@@ -391,6 +332,109 @@ fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
 
+    match cli.command {
+        Commands::Init => {
+            // Check if config file already exists
+            if cli.config.exists() {
+                ui::print_error(&format!("Configuration file already exists at: {}", cli.config.display()));
+                ui::print_step("Use a different path with --config or remove the existing file");
+                std::process::exit(1);
+            }
+
+            // Create parent directory if needed
+            if let Some(parent) = cli.config.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+            }
+
+            // Template configuration with comments
+            let template = r#"# bsdeploy configuration file
+# See https://github.com/yourusername/bsdeploy for full documentation
+
+# Service name (required)
+service: myapp
+
+# Remote FreeBSD hosts to deploy to (required)
+hosts:
+  - bsd.example.com
+
+# Run commands with doas privilege escalation (optional, default: false)
+doas: true
+
+# User to run the application as (optional)
+# If set, the user will be created inside the jail
+user: myapp
+
+# Jail-specific configuration (optional)
+jail:
+  # FreeBSD base version to use (optional, defaults to host version)
+  # base_version: "14.1-RELEASE"
+
+  # IP range for jail networking (optional, default: 10.0.0.0/24)
+  ip_range: "10.0.0.0/24"
+
+# Reverse proxy configuration (optional)
+# Caddy will proxy traffic from hostname to the jail
+proxy:
+  hostname: myapp.example.com
+  port: 3000
+  # tls: true  # default: true
+
+# System packages to install in the jail (optional)
+packages:
+  - curl
+  - libyaml
+
+# Development tools to install via mise (optional)
+# Tools are installed inside the jail during image building
+mise:
+  ruby: 3.4.7
+  # node: 20.0.0
+  # python: 3.11.0
+
+# Environment variables (optional)
+env:
+  # Clear environment variables (written to config)
+  clear:
+    - PORT: "3000"
+    - RAILS_ENV: production
+
+  # Secret environment variables (read from local environment)
+  # These should be set in your local shell before running bsdeploy
+  secret:
+    - SECRET_KEY_BASE
+
+# Commands to run before starting the application (optional)
+# Run inside the jail with the configured user and environment
+before_start:
+  - bundle install
+  - bin/rails assets:precompile
+  - bin/rails db:migrate
+
+# Commands to start the application (required)
+# Run inside the jail as daemonized processes
+start:
+  - bin/rails server
+
+# Data directories to persist across deployments (optional)
+# Format: "host_path: jail_path" or just "path" for same path
+data_directories:
+  - /var/bsdeploy/myapp/storage: /app/storage
+  # - /var/bsdeploy/myapp/uploads: /app/uploads
+"#;
+
+            std::fs::write(&cli.config, template)
+                .with_context(|| format!("Failed to write config file: {}", cli.config.display()))?;
+
+            ui::print_success(&format!("Created configuration file at: {}", cli.config.display()));
+            ui::print_step("Edit the file to customize your deployment settings");
+
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Load config for all other commands
     let config = match config::Config::load(&cli.config) {
         Ok(c) => c,
         Err(e) => {
@@ -401,65 +445,8 @@ fn main() -> Result<()> {
 
     ui::print_step(&format!("Loaded configuration for service: {}", config.service));
 
-    let restart_service = |host: &str, spinner: &ProgressBar| -> Result<()> {
-        let app_dir = format!("/var/db/bsdeploy/{}/app", config.service);
-        let env_file = format!("/usr/local/etc/bsdeploy/{}/env", config.service);
-        
-        // Use user-specific run/log dirs if user is configured
-        let (pid_file, log_file) = if config.user.is_some() {
-             (
-                format!("/var/run/bsdeploy/{}/service.pid", config.service),
-                format!("/var/log/bsdeploy/{}/service.log", config.service)
-             )
-        } else {
-             (
-                format!("/var/run/bsdeploy_{}.pid", config.service),
-                format!("/var/log/bsdeploy_{}.log", config.service)
-             )
-        };
-        
-        spinner.set_message(format!("[{}] Stopping service...", host));
-        // Try to kill and wait for process to exit
-        let stop_cmd = format!(
-            "if [ -f {0} ]; then 
-                pkill -F {0}; 
-                count=0; 
-                while [ -f {0} ] && pkill -0 -F {0} >/dev/null 2>&1; do 
-                    sleep 0.5; 
-                    count=$((count+1)); 
-                    if [ $count -ge 20 ]; then 
-                        pkill -9 -F {0}; 
-                        break; 
-                    fi; 
-                done; 
-            fi",
-            pid_file
-        );
-        // We use 'sh -c' explicitly to handle the shell logic
-        let _ = remote::run(host, &maybe_doas(&format!("sh -c '{}'", stop_cmd), config.doas));
-
-        for cmd in &config.start {
-            spinner.set_message(format!("[{}] Starting: {}...", host, cmd));
-            
-            // Construct daemon command
-            let mut daemon_cmd = format!("daemon -f -p {} -o {}", pid_file, log_file);
-            if let Some(u) = &config.user {
-                daemon_cmd.push_str(&format!(" -u {}", u));
-            }
-            
-            // Use bash instead of sh for better compatibility (e.g. mise)
-            // We do NOT redirect the outer daemon command to /dev/null so we can see startup errors.
-            // daemon -f closes standard streams upon success.
-            let full_cmd = format!(
-                "{} bash -c 'source {} && cd {} && {}'",
-                daemon_cmd, env_file, app_dir, cmd
-            );
-            remote::run(host, &maybe_doas(&full_cmd, config.doas))?;
-        }
-        Ok(())
-    };
-
     match cli.command {
+        Commands::Init => unreachable!(), // Already handled above
         Commands::Setup => {
             ui::print_step(&format!("Running setup for {} hosts", config.hosts.len()));
 
@@ -539,32 +526,7 @@ fn main() -> Result<()> {
                     }
                 }
 
-                // 4. Install Mise and Tools (only for Host strategy)
-                // For Jail strategy, mise is installed inside jails during image building
-                if !config.mise.is_empty() && config.strategy == config::Strategy::Host {
-                    spinner.set_message(format!("[{}] Installing Mise and build deps...", host));
-                    // Install build deps: gmake, gcc, python3, pkgconf
-                    remote::run(host, &maybe_doas("pkg install -y mise gmake gcc python3 pkgconf", config.doas))?;
-
-                    for (tool, version) in &config.mise {
-                        spinner.set_message(format!("[{}] Installing {}@{}...", host, tool, version));
-                        // Set environment variables to help compilation on FreeBSD
-                        let cmd = format!("export CC=gcc CXX=g++ MAKE=gmake && mise use --global {}@{}", tool, version);
-
-                        // Run as user if configured, otherwise as doas/root
-                        let exec_cmd = if let Some(user) = &config.user {
-                             // Use su - to run as user with clean environment (loading .profile etc if needed, though mise use global writes to config)
-                             // Actually, 'mise use --global' writes to ~/.config/mise/config.toml of the USER running it.
-                             format!("su - {} -c \"{}\"", user, cmd.replace("\"", "\\\""))
-                        } else {
-                             format!("bash -c '{}'", cmd)
-                        };
-
-                        remote::run(host, &maybe_doas(&exec_cmd, config.doas))?;
-                    }
-                }
-
-                // 5. Setup directories
+                // 4. Setup directories
                 spinner.set_message(format!("[{}] Creating directories...", host));
                 let app_dir = format!("/var/db/bsdeploy/{}/app", config.service);
                 remote::run(host, &maybe_doas(&format!("mkdir -p {}", app_dir), config.doas))?;
@@ -659,30 +621,11 @@ fn main() -> Result<()> {
             
             for host in &config.hosts {
                 let spinner = ui::create_spinner(&format!("Deploying to {}", host));
-                
-                match config.strategy {
-                    config::Strategy::Host => {
-                        deploy_host(&config, host, &spinner, &restart_service)?;
-                    },
-                    config::Strategy::Jail => {
-                        deploy_jail(&config, host, &spinner)?;
-                    }
-                }
+
+                deploy_jail(&config, host, &spinner)?;
 
                 spinner.finish_with_message(format!("Deploy complete for {}", host));
                 ui::print_success(&format!("{} deployed successfully", host));
-            }
-        }
-        Commands::Restart => {
-            ui::print_step(&format!("Running restart for {} hosts", config.hosts.len()));
-            
-            for host in &config.hosts {
-                let spinner = ui::create_spinner(&format!("Restarting {}", host));
-                
-                restart_service(host, &spinner)?;
-                
-                spinner.finish_with_message(format!("Restart complete for {}", host));
-                ui::print_success(&format!("{} restarted successfully", host));
             }
         }
         Commands::Destroy => {
@@ -743,19 +686,7 @@ fn main() -> Result<()> {
                 remote::run(host, &format!("{}rm -f {}", cmd_prefix, caddy_conf)).ok();
                 remote::run(host, &format!("{}service caddy reload", cmd_prefix)).ok();
 
-                // 3. Remove Service Directories (Env, App, Run, Log)
-                spinner.set_message(format!("[{}] Removing service directories...", host));
-                let dirs = vec![
-                    format!("/usr/local/etc/bsdeploy/{}", config.service),
-                    format!("/var/db/bsdeploy/{}", config.service),
-                    format!("/var/run/bsdeploy/{}", config.service),
-                    format!("/var/log/bsdeploy/{}", config.service),
-                ];
-                for dir in dirs {
-                    remote::run(host, &format!("{}rm -rf {}", cmd_prefix, dir)).ok();
-                }
-
-                // 4. Note: We keep images because they might be shared by other apps with same hashes.
+                // 3. Note: We keep images because they might be shared by other apps with same hashes.
                 // If the user wants to clear ALL images, they can use setup or manual cleanup.
 
                 spinner.finish_with_message(format!("Resources destroyed for {}", host));

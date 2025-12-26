@@ -9,8 +9,6 @@ pub struct Config {
     pub service: String,
     pub user: Option<String>,
     pub hosts: Vec<String>,
-    #[serde(default)]
-    pub strategy: Strategy,
     pub jail: Option<JailConfig>,
     #[serde(default)]
     pub packages: Vec<String>,
@@ -52,18 +50,6 @@ impl DataDirectory {
     }
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Strategy {
-    Host,
-    Jail,
-}
-
-impl Default for Strategy {
-    fn default() -> Self {
-        Strategy::Host
-    }
-}
 
 #[derive(Debug, Deserialize, Default)]
 pub struct JailConfig {
@@ -95,6 +81,16 @@ impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config file: {:?}", path.as_ref()))?;
+
+        // Check for deprecated 'strategy' field
+        let value: serde_yaml::Value = serde_yaml::from_str(&content)
+            .with_context(|| "Failed to parse YAML config")?;
+        if let Some(mapping) = value.as_mapping() {
+            if mapping.contains_key(&serde_yaml::Value::String("strategy".to_string())) {
+                anyhow::bail!("The 'strategy' field is no longer supported. Remove it from your config - jail deployment is now the only mode.");
+            }
+        }
+
         let config: Config = serde_yaml::from_str(&content)
             .with_context(|| "Failed to parse YAML config")?;
         Ok(config)

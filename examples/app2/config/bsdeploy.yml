@@ -3,7 +3,6 @@ hosts:
   - bsd.localdomain
 doas: true
 user: app2
-strategy: jail
 jail:
   ip_range: "10.0.0.0/24"
 proxy:
