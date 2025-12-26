@@ -153,8 +153,12 @@ pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image
 
             let rw_dirs = vec!["etc", "var", "root", "home"];
             for dir in rw_dirs {
-                // Use cp -al for hardlinked copy (UFS-optimized)
-                remote::run(host, &format!("{}cp -al {}/{} {}/", cmd_prefix, img, dir, jail_root))?;
+                let src_dir = format!("{}/{}", img, dir);
+                // Check if directory exists before copying (some dirs may not exist in image)
+                if remote::run(host, &format!("test -d {}", src_dir)).is_ok() {
+                    // Use rsync --link-dest for hardlinked copy (handles FreeBSD immutable flags)
+                    remote::run(host, &format!("{}rsync -a --link-dest={} {}/ {}/{}/", cmd_prefix, src_dir, src_dir, jail_root, dir))?;
+                }
             }
         }
         

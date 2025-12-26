@@ -102,9 +102,9 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
 
     if !zfs_cloned_base {
         spinner.set_message(format!("[{}] Image: Populating base system with hardlinks (UFS-optimized)...", host));
-        // Use cp -al for instant hardlinked copy instead of slow rsync
+        // Use rsync --link-dest for hardlinked copy (handles FreeBSD immutable flags)
         // This shares disk space with base system until files are modified
-        remote::run(host, &format!("{}cp -al {}/ {}", cmd_prefix, base_dir, image_path))?;
+        remote::run(host, &format!("{}rsync -a --link-dest={} {}/ {}/", cmd_prefix, base_dir, base_dir, image_path))?;
         // Fix var/empty permissions (needs to be created with specific perms)
         remote::run(host, &format!("{}chmod 555 {}/var/empty", cmd_prefix, image_path))?;
     }
