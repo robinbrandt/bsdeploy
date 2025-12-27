@@ -1,8 +1,11 @@
 mod config;
+mod constants;
 mod remote;
 mod ui;
 mod jail;
 mod image;
+
+use constants::*;
 
 use anyhow::{Context, Result};
 
@@ -56,7 +59,7 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
         os_release.split("-p").next().unwrap_or(&os_release).to_string()
     };
     
-    let subnet = config.jail.as_ref().and_then(|j| j.ip_range.as_deref()).unwrap_or("10.0.0.0/24");
+    let subnet = config.jail.as_ref().and_then(|j| j.ip_range.as_deref()).unwrap_or(DEFAULT_IP_RANGE);
 
     spinner.set_message(format!("[{}] Ensuring base system {}...", host, base_version));
     jail::ensure_base(host, &base_version, config.doas)?;
@@ -92,8 +95,8 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
 
     // 5. Sync App
     spinner.set_message(format!("[{}] Syncing app to jail...", host));
-    let app_dir = "/app"; 
-    let host_app_dir = format!("{}/app", jail_info.path);
+    let app_dir = JAIL_APP_DIR;
+    let host_app_dir = format!("{}{}", jail_info.path, JAIL_APP_DIR);
     
     remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, host_app_dir))?;
     
@@ -125,8 +128,8 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
          env_content.push_str(&format!("export {}='{}'\n", k, v.replace("'", "'\\''")));
     }
     if !config.mise.is_empty() { env_content.push_str("\neval \"$(mise activate bash)\"\n"); }
-    
-    let env_path = format!("{}/etc/bsdeploy.env", jail_info.path);
+
+    let env_path = format!("{}{}", jail_info.path, JAIL_ENV_FILE);
     remote::write_file(host, &env_content, &env_path, config.doas)?;
 
     // 7. Before Start (Inherit IP)
@@ -162,8 +165,8 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
 
     // 8.5 Ensure Service Dirs in Jail
     if let Some(user) = &config.user {
-         let jail_run_dir = format!("{}/var/run/bsdeploy/{}", jail_info.path, config.service);
-         let jail_log_dir = format!("{}/var/log/bsdeploy/{}", jail_info.path, config.service);
+         let jail_run_dir = format!("{}{}/{}", jail_info.path, RUN_DIR, config.service);
+         let jail_log_dir = format!("{}{}/{}", jail_info.path, LOG_DIR, config.service);
          
          remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, jail_run_dir))?;
          remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, jail_log_dir))?;
@@ -176,11 +179,11 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
     // 9. Start Service
     for cmd in &config.start {
         spinner.set_message(format!("[{}] Jail: Starting service...", host));
-        
-        let (pid_file, log_file) = if let Some(_) = &config.user {
+
+        let (pid_file, log_file) = if config.user.is_some() {
              (
-                format!("/var/run/bsdeploy/{}/service.pid", config.service),
-                format!("/var/log/bsdeploy/{}/service.log", config.service)
+                format!("{}/{}/service.pid", RUN_DIR, config.service),
+                format!("{}/{}/service.log", LOG_DIR, config.service)
              )
         } else {
              ("/var/run/service.pid".to_string(), "/var/log/service.log".to_string())
@@ -218,7 +221,7 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
 
             );
 
-            let caddy_conf_path = format!("/usr/local/etc/caddy/conf.d/{}.caddy", config.service);
+            let caddy_conf_path = format!("{}/{}.caddy", CADDY_CONF_DIR, config.service);
 
             remote::write_file(host, &proxy_conf_content, &caddy_conf_path, config.doas)?;
 
@@ -229,7 +232,7 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
     // 11. Stop processes in existing jails
     spinner.set_message(format!("[{}] Stopping processes in old jails...", host));
 
-    let ls_cmd = format!("ls /usr/local/bsdeploy/jails/ | grep '^{}-' || true", config.service);
+    let ls_cmd = format!("ls {}/ | grep '^{}-' || true", JAILS_DIR, config.service);
     if let Ok(ls_out) = remote::run_with_output(host, &ls_cmd) {
         let existing_jails: Vec<String> = ls_out.lines()
             .map(|s| s.trim().to_string())
@@ -240,7 +243,7 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
             spinner.set_message(format!("[{}] Stopping service in jail {}...", host, jname));
 
             let pid_file = if config.user.is_some() {
-                format!("/var/run/bsdeploy/{}/service.pid", config.service)
+                format!("{}/{}/service.pid", RUN_DIR, config.service)
             } else {
                 "/var/run/service.pid".to_string()
             };
@@ -269,26 +272,26 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
 
     // 12. Prune Old Jails
     spinner.set_message(format!("[{}] Pruning old jails...", host));
-    
+
     // 1. Get all jail directories from filesystem
-    let ls_cmd = format!("ls /usr/local/bsdeploy/jails/ | grep '^{}-' || true", config.service);
+    let ls_cmd = format!("ls {}/ | grep '^{}-' || true", JAILS_DIR, config.service);
     if let Ok(ls_out) = remote::run_with_output(host, &ls_cmd) {
         let mut jails: Vec<String> = ls_out.lines()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
         jails.sort(); // Sort by timestamp
-        
-        // Keep only the last 3 most recent jails
-        if jails.len() > 3 {
-            let to_remove_count = jails.len() - 3;
+
+        // Keep only the last N most recent jails
+        if jails.len() > JAILS_TO_KEEP {
+            let to_remove_count = jails.len() - JAILS_TO_KEEP;
             let to_remove = &jails[0..to_remove_count];
-            
+
             for jname in to_remove {
                 if jname == &jail_info.name { continue; }
                 spinner.set_message(format!("[{}] Removing stale/old jail directory {}...", host, jname));
-                
-                let jpath = format!("/usr/local/bsdeploy/jails/{}", jname);
+
+                let jpath = format!("{}/{}", JAILS_DIR, jname);
 
                 // 1. Try to stop jail if it's running
                 remote::run(host, &format!("{}jail -r {} 2>/dev/null", cmd_prefix, jname)).ok();
@@ -501,7 +504,7 @@ data_directories:
                     
                     // We want to create zroot/bsdeploy, zroot/bsdeploy/base, etc.
                     // But we need to know the pool name or parent.
-                    let pool = root_dataset.split('/').next().unwrap_or("zroot");
+                    let pool = root_dataset.split('/').next().unwrap_or(DEFAULT_ZFS_POOL);
                     let bsdeploy_root_dataset = format!("{}/bsdeploy", pool);
                     
                     let datasets = vec![
@@ -516,9 +519,9 @@ data_directories:
                         if check_ds.is_err() {
                             // Determine mountpoint
                             let mountpoint = if ds == bsdeploy_root_dataset {
-                                "/usr/local/bsdeploy".to_string()
+                                BSDEPLOY_BASE.to_string()
                             } else {
-                                format!("/usr/local/bsdeploy/{}", ds.split('/').last().unwrap())
+                                format!("{}/{}", BSDEPLOY_BASE, ds.split('/').last().unwrap())
                             };
                             
                             remote::run(host, &maybe_doas(&format!("zfs create -o mountpoint={} {}", mountpoint, ds), config.doas)).ok();
@@ -528,10 +531,10 @@ data_directories:
 
                 // 4. Setup directories
                 spinner.set_message(format!("[{}] Creating directories...", host));
-                let app_dir = format!("/var/db/bsdeploy/{}/app", config.service);
+                let app_dir = format!("{}/{}/app", APP_DATA_DIR, config.service);
                 remote::run(host, &maybe_doas(&format!("mkdir -p {}", app_dir), config.doas))?;
 
-                let config_dir = format!("/usr/local/etc/bsdeploy/{}", config.service);
+                let config_dir = format!("{}/{}", CONFIG_DIR, config.service);
                 remote::run(host, &maybe_doas(&format!("mkdir -p {}", config_dir), config.doas))?;
 
                 for dir in &config.data_directories {
@@ -541,15 +544,15 @@ data_directories:
                 
                 // Create user-specific run/log dirs if needed
                 if let Some(user) = &config.user {
-                    let run_dir = format!("/var/run/bsdeploy/{}", config.service);
-                    let log_dir = format!("/var/log/bsdeploy/{}", config.service);
+                    let run_dir = format!("{}/{}", RUN_DIR, config.service);
+                    let log_dir = format!("{}/{}", LOG_DIR, config.service);
                     remote::run(host, &maybe_doas(&format!("mkdir -p {}", run_dir), config.doas))?;
                     remote::run(host, &maybe_doas(&format!("mkdir -p {}", log_dir), config.doas))?;
                     remote::run(host, &maybe_doas(&format!("chown {}:{} {}", user, user, run_dir), config.doas))?;
                     remote::run(host, &maybe_doas(&format!("chown {}:{} {}", user, user, log_dir), config.doas))?;
-                    
+
                     // Also chown app_dir and data directories
-                    remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, format!("/var/db/bsdeploy/{}", config.service)), config.doas))?;
+                    remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, format!("{}/{}", APP_DATA_DIR, config.service)), config.doas))?;
                     for dir in &config.data_directories {
                         let (host_path, _) = dir.get_paths();
                         remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, host_path), config.doas))?;
@@ -565,29 +568,27 @@ data_directories:
                 spinner.set_message(format!("[{}] Configuring Caddy...", host));
                 // Enable caddy
                 remote::run(host, &maybe_doas("sysrc caddy_enable=YES", config.doas))?;
-                
+
                 // Ensure conf.d exists
-                let caddy_conf_d = "/usr/local/etc/caddy/conf.d";
-                remote::run(host, &maybe_doas(&format!("mkdir -p {}", caddy_conf_d), config.doas))?;
+                remote::run(host, &maybe_doas(&format!("mkdir -p {}", CADDY_CONF_DIR), config.doas))?;
 
                 // Check/Create main Caddyfile
-                let caddyfile = "/usr/local/etc/caddy/Caddyfile";
-                let check_caddyfile = remote::run(host, &format!("test -f {}", caddyfile));
+                let check_caddyfile = remote::run(host, &format!("test -f {}", CADDYFILE_PATH));
                 
                 if check_caddyfile.is_err() {
                      // Create default Caddyfile importing conf.d
                      let default_caddy = "import conf.d/*.caddy\n";
-                     remote::write_file(host, default_caddy, caddyfile, config.doas)?;
+                     remote::write_file(host, default_caddy, CADDYFILE_PATH, config.doas)?;
                 } else {
                     // Check if import exists
-                    let check_import = remote::run(host, &format!("grep -q 'import conf.d/\\*.caddy' {}", caddyfile));
+                    let check_import = remote::run(host, &format!("grep -q 'import conf.d/\\*.caddy' {}", CADDYFILE_PATH));
                     if check_import.is_err() {
                         // Append import
-                        ui::print_step(&format!("Appending import to {}", caddyfile));
+                        ui::print_step(&format!("Appending import to {}", CADDYFILE_PATH));
                         let append_cmd = if config.doas {
-                            format!("echo 'import conf.d/*.caddy' | doas tee -a {} > /dev/null", caddyfile)
+                            format!("echo 'import conf.d/*.caddy' | doas tee -a {} > /dev/null", CADDYFILE_PATH)
                         } else {
-                            format!("echo 'import conf.d/*.caddy' | tee -a {} > /dev/null", caddyfile)
+                            format!("echo 'import conf.d/*.caddy' | tee -a {} > /dev/null", CADDYFILE_PATH)
                         };
                         remote::run(host, &append_cmd)?;
                     }
@@ -601,10 +602,10 @@ data_directories:
                         format!("http://{}", proxy.hostname)
                     };
                     let proxy_conf_content = format!(
-                        "{} {{\n    reverse_proxy :{}\n}}\n", 
+                        "{} {{\n    reverse_proxy :{}\n}}\n",
                         hostname, proxy.port
                     );
-                    let proxy_conf_path = format!("{}/{}.caddy", caddy_conf_d, config.service);
+                    let proxy_conf_path = format!("{}/{}.caddy", CADDY_CONF_DIR, config.service);
                     remote::write_file(host, &proxy_conf_content, &proxy_conf_path, config.doas)?;
                 }
 
@@ -637,14 +638,14 @@ data_directories:
 
                 // 1. Find and Remove Jails & IP Aliases
                 spinner.set_message(format!("[{}] Removing jails and networking...", host));
-                
+
                 // Get list of jail directories from filesystem
-                let ls_cmd = format!("ls /usr/local/bsdeploy/jails/ | grep '^{}-' || true", config.service);
+                let ls_cmd = format!("ls {}/ | grep '^{}-' || true", JAILS_DIR, config.service);
                 if let Ok(ls_out) = remote::run_with_output(host, &ls_cmd) {
                     for jname in ls_out.lines().map(|s| s.trim()).filter(|s| !s.is_empty()) {
                         spinner.set_message(format!("[{}] Cleaning up jail {}...", host, jname));
-                        
-                        let jpath = format!("/usr/local/bsdeploy/jails/{}", jname);
+
+                        let jpath = format!("{}/{}", JAILS_DIR, jname);
 
                         // Try to get IP before stopping
                         let info_cmd = format!("jls -j {} ip4.addr 2>/dev/null || echo '-'", jname);
@@ -682,7 +683,7 @@ data_directories:
 
                 // 2. Remove Caddy Proxy Config
                 spinner.set_message(format!("[{}] Removing proxy configuration...", host));
-                let caddy_conf = format!("/usr/local/etc/caddy/conf.d/{}.caddy", config.service);
+                let caddy_conf = format!("{}/{}.caddy", CADDY_CONF_DIR, config.service);
                 remote::run(host, &format!("{}rm -f {}", cmd_prefix, caddy_conf)).ok();
                 remote::run(host, &format!("{}service caddy reload", cmd_prefix)).ok();
 

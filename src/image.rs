@@ -1,3 +1,4 @@
+use crate::constants::*;
 use crate::{config, remote};
 use anyhow::Result;
 use sha2::{Sha256, Digest};
@@ -44,11 +45,11 @@ fn maybe_doas(cmd: &str, doas: bool) -> String {
 pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spinner: &ProgressBar) -> Result<String> {
     let hash = get_image_hash(config, base_version);
     let short_hash = &hash[..12];
-    let image_path = format!("/usr/local/bsdeploy/images/{}", short_hash);
+    let image_path = format!("{}/{}", IMAGES_DIR, short_hash);
     let cmd_prefix = if config.doas { "doas " } else { "" };
 
     // Check if valid image exists (by checking ZFS snapshot)
-    if let Ok(Some(images_parent_ds)) = remote::get_zfs_dataset(host, "/usr/local/bsdeploy/images") {
+    if let Ok(Some(images_parent_ds)) = remote::get_zfs_dataset(host, IMAGES_DIR) {
         let image_ds = format!("{}/{}", images_parent_ds, short_hash);
         let snap_name = format!("{}@base", image_ds);
         
@@ -72,10 +73,10 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
     spinner.set_message(format!("[{}] Building image {} (in-place)...", host, short_hash));
 
     // 1. Create Image Dataset & Populate Base
-    let base_dir = format!("/usr/local/bsdeploy/base/{}", base_version);
+    let base_dir = format!("{}/{}", BASE_DIR, base_version);
     let mut zfs_cloned_base = false;
 
-    if let Ok(Some(images_parent_ds)) = remote::get_zfs_dataset(host, "/usr/local/bsdeploy/images") {
+    if let Ok(Some(images_parent_ds)) = remote::get_zfs_dataset(host, IMAGES_DIR) {
          let image_ds = format!("{}/{}", images_parent_ds, short_hash);
          
          // Check if Base has @clean snapshot
@@ -172,7 +173,7 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
 
     if let Err(e) = res {
         // If build failed, destroy the dataset so we don't leave broken state
-        if let Ok(Some(images_parent_ds)) = remote::get_zfs_dataset(host, "/usr/local/bsdeploy/images") {
+        if let Ok(Some(images_parent_ds)) = remote::get_zfs_dataset(host, IMAGES_DIR) {
              let image_ds = format!("{}/{}", images_parent_ds, short_hash);
              remote::run(host, &format!("{}zfs destroy -r {}", cmd_prefix, image_ds)).ok();
         }

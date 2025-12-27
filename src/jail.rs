@@ -1,3 +1,4 @@
+use crate::constants::*;
 use crate::remote;
 use anyhow::{Context, Result, anyhow};
 use chrono::Local;
@@ -7,9 +8,9 @@ fn find_free_ip(host: &str, subnet: &str, _doas: bool) -> Result<String> {
     // Default 10.0.0.0/24
     // We scan 10.0.0.2 to 10.0.0.254
     // subnet format: "10.0.0.0/24"
-    
+
     // Parse base
-    let base_ip = subnet.split('/').next().unwrap_or("10.0.0.0");
+    let base_ip = subnet.split('/').next().unwrap_or(DEFAULT_BASE_IP);
     let parts: Vec<&str> = base_ip.split('.').collect();
     if parts.len() != 4 {
         return Err(anyhow!("Invalid subnet format"));
@@ -36,13 +37,12 @@ fn find_free_ip(host: &str, subnet: &str, _doas: bool) -> Result<String> {
 }
 
 pub fn ensure_base(host: &str, version: &str, doas: bool) -> Result<()> {
-    let base_parent_dir = "/usr/local/bsdeploy/base";
-    let base_dir = format!("{}/{}", base_parent_dir, version);
+    let base_dir = format!("{}/{}", BASE_DIR, version);
     let cmd_prefix = if doas { "doas " } else { "" };
     
     // Check if base is fully ready (marker or just existence)
     // We check for @clean snapshot if ZFS, or just directory if not.
-    let is_zfs = remote::get_zfs_dataset(host, base_parent_dir).ok().flatten().is_some();
+    let is_zfs = remote::get_zfs_dataset(host, BASE_DIR).ok().flatten().is_some();
     
     if is_zfs {
         if let Ok(Some(ds)) = remote::get_zfs_dataset(host, &base_dir) {
@@ -60,7 +60,7 @@ pub fn ensure_base(host: &str, version: &str, doas: bool) -> Result<()> {
 
     // Create directory or dataset
     if is_zfs {
-         if let Ok(Some(parent_ds)) = remote::get_zfs_dataset(host, base_parent_dir) {
+         if let Ok(Some(parent_ds)) = remote::get_zfs_dataset(host, BASE_DIR) {
              let target_ds = format!("{}/{}", parent_ds, version);
              // Create dataset if not exists
              if remote::run(host, &format!("zfs list -H -o name {} 2>/dev/null", target_ds)).is_err() {
@@ -109,8 +109,8 @@ pub struct JailInfo {
 pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image_path: Option<&str>, data_dirs: &[crate::config::DataDirectory], doas: bool) -> Result<JailInfo> {
     let timestamp = Local::now().format("%Y%m%d-%H%M%S");
     let jail_name = format!("{}-{}", service, timestamp);
-    let jail_root = format!("/usr/local/bsdeploy/jails/{}", jail_name);
-    let base_dir = format!("/usr/local/bsdeploy/base/{}", base_version);
+    let jail_root = format!("{}/{}", JAILS_DIR, jail_name);
+    let base_dir = format!("{}/{}", BASE_DIR, base_version);
     let cmd_prefix = if doas { "doas " } else { "" };
 
     // 0. Ensure lo1 exists
@@ -136,7 +136,7 @@ pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image
             // Check if snapshot exists
             if remote::run(host, &format!("zfs list -H -o name {} 2>/dev/null", snap_name)).is_ok() {
                 // Find parent dataset for jails
-                if let Ok(Some(jails_parent_dataset)) = remote::get_zfs_dataset(host, "/usr/local/bsdeploy/jails") {
+                if let Ok(Some(jails_parent_dataset)) = remote::get_zfs_dataset(host, JAILS_DIR) {
                     let target_dataset = format!("{}/{}", jails_parent_dataset, jail_name);
                     // Clone it and set explicit mountpoint
                     if remote::run(host, &format!("{}zfs clone -o mountpoint={} {} {}", cmd_prefix, jail_root, snap_name, target_dataset)).is_ok() {
