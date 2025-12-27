@@ -1,6 +1,7 @@
 mod config;
 mod constants;
 mod remote;
+mod shell;
 mod ui;
 mod jail;
 mod image;
@@ -85,10 +86,12 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
 
     // 4.5 Ensure Data Directory Permissions (Must be after start for jexec)
     if let Some(user) = &config.user {
+        let safe_user = shell::escape(user);
         for entry in &config.data_directories {
             let (_, jail_path) = entry.get_paths();
             if !jail_path.is_empty() {
-                remote::run(host, &format!("{}jexec {} chown -R {} {}", cmd_prefix, jail_info.name, user, jail_path))?;
+                let safe_path = shell::escape(&jail_path);
+                remote::run(host, &format!("{}jexec {} chown -R {} {}", cmd_prefix, jail_info.name, safe_user, safe_path))?;
             }
         }
     }
@@ -113,19 +116,22 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
     }
 
     remote::sync(host, ".", &host_app_dir, &excludes, config.doas)?;
-    
+
     if let Some(user) = &config.user {
-        remote::run(host, &format!("{}jexec {} chown -R {} {}", cmd_prefix, jail_info.name, user, app_dir))?;
+        let safe_user = shell::escape(user);
+        remote::run(host, &format!("{}jexec {} chown -R {} {}", cmd_prefix, jail_info.name, safe_user, app_dir))?;
     }
 
     // 6. Config & Env
     let mut env_content = String::new();
     for map in &config.env.clear {
-        for (k, v) in map { env_content.push_str(&format!("export {}='{}'\n", k, v.replace("'", "'\\''"))); }
+        for (k, v) in map {
+            env_content.push_str(&format!("export {}='{}'\n", k, shell::escape_env_value(v)));
+        }
     }
     for k in &config.env.secret {
          let v = std::env::var(k)?;
-         env_content.push_str(&format!("export {}='{}'\n", k, v.replace("'", "'\\''")));
+         env_content.push_str(&format!("export {}='{}'\n", k, shell::escape_env_value(&v)));
     }
     if !config.mise.is_empty() { env_content.push_str("\neval \"$(mise activate bash)\"\n"); }
 
@@ -135,8 +141,9 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
     // 7. Before Start (Inherit IP)
     // Trust mise config first (as user)
     if let Some(user) = &config.user {
-        let trust_cmd = format!("{}jexec {} su - {} -c 'mise trust {}'", cmd_prefix, jail_info.name, user, app_dir);
-        remote::run(host, &trust_cmd).ok(); 
+        let safe_user = shell::escape(user);
+        let trust_cmd = format!("{}jexec {} su - {} -c 'mise trust {}'", cmd_prefix, jail_info.name, safe_user, app_dir);
+        remote::run(host, &trust_cmd).ok();
     } else {
         let trust_cmd = format!("{}jexec {} bash -c 'mise trust {}'", cmd_prefix, jail_info.name, app_dir);
         remote::run(host, &trust_cmd).ok();
@@ -144,9 +151,10 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
 
     for cmd in &config.before_start {
         spinner.set_message(format!("[{}] Jail: Running {}...", host, cmd));
-        let full_cmd = format!("bash -c 'source /etc/bsdeploy.env && cd {} && {}'", app_dir, cmd);
+        let full_cmd = format!("bash -c 'source {} && cd {} && {}'", JAIL_ENV_FILE, app_dir, cmd);
         let exec_cmd = if let Some(user) = &config.user {
-             format!("{}jexec {} su - {} -c \"{}\"", cmd_prefix, jail_info.name, user, full_cmd.replace("\"", "\\\""))
+             let safe_user = shell::escape(user);
+             format!("{}jexec {} su - {} -c \"{}\"", cmd_prefix, jail_info.name, safe_user, full_cmd.replace("\"", "\\\""))
         } else {
              format!("{}jexec {} {}", cmd_prefix, jail_info.name, full_cmd)
         };
@@ -165,14 +173,16 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
 
     // 8.5 Ensure Service Dirs in Jail
     if let Some(user) = &config.user {
-         let jail_run_dir = format!("{}{}/{}", jail_info.path, RUN_DIR, config.service);
-         let jail_log_dir = format!("{}{}/{}", jail_info.path, LOG_DIR, config.service);
-         
+         let safe_user = shell::escape(user);
+         let safe_service = shell::escape(&config.service);
+         let jail_run_dir = format!("{}{}/{}", jail_info.path, RUN_DIR, safe_service);
+         let jail_log_dir = format!("{}{}/{}", jail_info.path, LOG_DIR, safe_service);
+
          remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, jail_run_dir))?;
          remote::run(host, &format!("{}mkdir -p {}", cmd_prefix, jail_log_dir))?;
-         
-         remote::run(host, &format!("{}chown {}:{} {}", cmd_prefix, user, user, jail_run_dir))?;
-         remote::run(host, &format!("{}chown {}:{} {}", cmd_prefix, user, user, jail_log_dir))?;
+
+         remote::run(host, &format!("{}chown {}:{} {}", cmd_prefix, safe_user, safe_user, jail_run_dir))?;
+         remote::run(host, &format!("{}chown {}:{} {}", cmd_prefix, safe_user, safe_user, jail_log_dir))?;
     }
     // /var/run and /var/log usually exist by default
 
@@ -180,19 +190,22 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
     for cmd in &config.start {
         spinner.set_message(format!("[{}] Jail: Starting service...", host));
 
+        let safe_service = shell::escape(&config.service);
         let (pid_file, log_file) = if config.user.is_some() {
              (
-                format!("{}/{}/service.pid", RUN_DIR, config.service),
-                format!("{}/{}/service.log", LOG_DIR, config.service)
+                format!("{}/{}/service.pid", RUN_DIR, safe_service),
+                format!("{}/{}/service.log", LOG_DIR, safe_service)
              )
         } else {
              ("/var/run/service.pid".to_string(), "/var/log/service.log".to_string())
         };
 
         let mut daemon_cmd = format!("daemon -f -p {} -o {}", pid_file, log_file);
-        if let Some(u) = &config.user { daemon_cmd.push_str(&format!(" -u {}", u)); }
-        
-        let full_cmd = format!("{} bash -c 'source /etc/bsdeploy.env && cd {} && {}'", daemon_cmd, app_dir, cmd);
+        if let Some(u) = &config.user {
+            daemon_cmd.push_str(&format!(" -u {}", shell::escape(u)));
+        }
+
+        let full_cmd = format!("{} bash -c 'source {} && cd {} && {}'", daemon_cmd, JAIL_ENV_FILE, app_dir, cmd);
         
         remote::run(host, &format!("{}jexec {} {}", cmd_prefix, jail_info.name, full_cmd))?;
     }
@@ -242,8 +255,9 @@ fn deploy_jail(config: &config::Config, host: &str, spinner: &ProgressBar) -> Re
         for jname in existing_jails {
             spinner.set_message(format!("[{}] Stopping service in jail {}...", host, jname));
 
+            let safe_service = shell::escape(&config.service);
             let pid_file = if config.user.is_some() {
-                format!("{}/{}/service.pid", RUN_DIR, config.service)
+                format!("{}/{}/service.pid", RUN_DIR, safe_service)
             } else {
                 "/var/run/service.pid".to_string()
             };
@@ -457,12 +471,12 @@ data_directories:
             let mut env_content = String::new();
             for map in &config.env.clear {
                 for (k, v) in map {
-                     env_content.push_str(&format!("export {}='{}'\n", k, v.replace("'", "'\\''")));
+                     env_content.push_str(&format!("export {}='{}'\n", k, shell::escape_env_value(v)));
                 }
             }
             for k in &config.env.secret {
                 let v = std::env::var(k).with_context(|| format!("Missing local secret environment variable: {}", k))?;
-                env_content.push_str(&format!("export {}='{}'\n", k, v.replace("'", "'\\''")));
+                env_content.push_str(&format!("export {}='{}'\n", k, shell::escape_env_value(&v)));
             }
 
             // Add mise activation if used
@@ -483,18 +497,20 @@ data_directories:
 
                 // 2.5 Create User if needed (Moved before Mise setup)
                 if let Some(user) = &config.user {
+                    let safe_user = shell::escape(user);
                     spinner.set_message(format!("[{}] Ensure user {} exists...", host, user));
                     // Check if user exists, if not create
-                    let check_user = remote::run(host, &format!("id {}", user));
+                    let check_user = remote::run(host, &format!("id {}", safe_user));
                     if check_user.is_err() {
-                        remote::run(host, &maybe_doas(&format!("pw useradd -n {} -m -s /usr/local/bin/bash", user), config.doas))?;
+                        remote::run(host, &maybe_doas(&format!("pw useradd -n {} -m -s /usr/local/bin/bash", safe_user), config.doas))?;
                     }
                 }
 
                 // 3. Install user packages
                 if !config.packages.is_empty() {
                     spinner.set_message(format!("[{}] Installing user packages...", host));
-                    let pkgs = config.packages.join(" ");
+                    let safe_pkgs: Vec<String> = config.packages.iter().map(|p| shell::escape(p)).collect();
+                    let pkgs = safe_pkgs.join(" ");
                     remote::run(host, &maybe_doas(&format!("pkg install -y {}", pkgs), config.doas))?;
                 }
 
@@ -531,31 +547,36 @@ data_directories:
 
                 // 4. Setup directories
                 spinner.set_message(format!("[{}] Creating directories...", host));
-                let app_dir = format!("{}/{}/app", APP_DATA_DIR, config.service);
+                let safe_service = shell::escape(&config.service);
+                let app_dir = format!("{}/{}/app", APP_DATA_DIR, safe_service);
                 remote::run(host, &maybe_doas(&format!("mkdir -p {}", app_dir), config.doas))?;
 
-                let config_dir = format!("{}/{}", CONFIG_DIR, config.service);
+                let config_dir = format!("{}/{}", CONFIG_DIR, safe_service);
                 remote::run(host, &maybe_doas(&format!("mkdir -p {}", config_dir), config.doas))?;
 
                 for dir in &config.data_directories {
                     let (host_path, _) = dir.get_paths();
-                    remote::run(host, &maybe_doas(&format!("mkdir -p {}", host_path), config.doas))?;
+                    let safe_path = shell::escape(&host_path);
+                    remote::run(host, &maybe_doas(&format!("mkdir -p {}", safe_path), config.doas))?;
                 }
-                
+
                 // Create user-specific run/log dirs if needed
                 if let Some(user) = &config.user {
-                    let run_dir = format!("{}/{}", RUN_DIR, config.service);
-                    let log_dir = format!("{}/{}", LOG_DIR, config.service);
+                    let safe_user = shell::escape(user);
+                    let run_dir = format!("{}/{}", RUN_DIR, safe_service);
+                    let log_dir = format!("{}/{}", LOG_DIR, safe_service);
                     remote::run(host, &maybe_doas(&format!("mkdir -p {}", run_dir), config.doas))?;
                     remote::run(host, &maybe_doas(&format!("mkdir -p {}", log_dir), config.doas))?;
-                    remote::run(host, &maybe_doas(&format!("chown {}:{} {}", user, user, run_dir), config.doas))?;
-                    remote::run(host, &maybe_doas(&format!("chown {}:{} {}", user, user, log_dir), config.doas))?;
+                    remote::run(host, &maybe_doas(&format!("chown {}:{} {}", safe_user, safe_user, run_dir), config.doas))?;
+                    remote::run(host, &maybe_doas(&format!("chown {}:{} {}", safe_user, safe_user, log_dir), config.doas))?;
 
                     // Also chown app_dir and data directories
-                    remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, format!("{}/{}", APP_DATA_DIR, config.service)), config.doas))?;
+                    let app_data_service = format!("{}/{}", APP_DATA_DIR, safe_service);
+                    remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", safe_user, safe_user, app_data_service), config.doas))?;
                     for dir in &config.data_directories {
                         let (host_path, _) = dir.get_paths();
-                        remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", user, user, host_path), config.doas))?;
+                        let safe_path = shell::escape(&host_path);
+                        remote::run(host, &maybe_doas(&format!("chown -R {}:{} {}", safe_user, safe_user, safe_path), config.doas))?;
                     }
                 }
 

@@ -1,5 +1,5 @@
 use crate::constants::*;
-use crate::{config, remote};
+use crate::{config, remote, shell};
 use anyhow::Result;
 use sha2::{Sha256, Digest};
 use std::collections::BTreeMap;
@@ -134,15 +134,17 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
         spinner.set_message(format!("[{}] Image: Installing packages...", host));
         remote::run(host, &format!("{}pkg -j {} install -y git bash", cmd_prefix, build_jail_name))?;
         if !config.packages.is_empty() {
-            let pkgs = config.packages.join(" ");
+            let safe_pkgs: Vec<String> = config.packages.iter().map(|p| shell::escape(p)).collect();
+            let pkgs = safe_pkgs.join(" ");
             remote::run(host, &format!("{}pkg -j {} install -y {}", cmd_prefix, build_jail_name, pkgs))?;
         }
 
         // Create User
         if let Some(user) = &config.user {
-            let check_user = format!("{}jexec {} id {}", cmd_prefix, build_jail_name, user);
+            let safe_user = shell::escape(user);
+            let check_user = format!("{}jexec {} id {}", cmd_prefix, build_jail_name, safe_user);
             if remote::run(host, &check_user).is_err() {
-                remote::run(host, &format!("{}jexec {} pw useradd -n {} -m -s /usr/local/bin/bash", cmd_prefix, build_jail_name, user))?;
+                remote::run(host, &format!("{}jexec {} pw useradd -n {} -m -s /usr/local/bin/bash", cmd_prefix, build_jail_name, safe_user))?;
             }
         }
 
@@ -152,16 +154,19 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
             remote::run(host, &format!("{}pkg -j {} install -y mise gmake gcc python3 pkgconf", cmd_prefix, build_jail_name))?;
             for (tool, version) in &config.mise {
                  spinner.set_message(format!("[{}] Image: Building {}@{}...", host, tool, version));
-                 let cmd = format!("export CC=gcc CXX=g++ MAKE=gmake && mise use --global {}@{}", tool, version);
+                 let safe_tool = shell::escape(tool);
+                 let safe_version = shell::escape(version);
+                 let cmd = format!("export CC=gcc CXX=g++ MAKE=gmake && mise use --global {}@{}", safe_tool, safe_version);
                  let exec_cmd = if let Some(user) = &config.user {
-                     format!("{}jexec {} su - {} -c \"{}\"", cmd_prefix, build_jail_name, user, cmd.replace("\"", "\\\""))
+                     let safe_user = shell::escape(user);
+                     format!("{}jexec {} su - {} -c \"{}\"", cmd_prefix, build_jail_name, safe_user, cmd.replace("\"", "\\\""))
                  } else {
                      format!("{}jexec {} bash -c '{}'", cmd_prefix, build_jail_name, cmd)
                  };
                  remote::run(host, &exec_cmd)?;
             }
         }
-        
+
         // Cleanup pkg cache inside jail
         remote::run(host, &format!("{}pkg -j {} clean -y", cmd_prefix, build_jail_name))?;
         Ok(())
