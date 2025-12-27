@@ -40,6 +40,9 @@ pub const CADDY_CONF_DIR: &str = "/usr/local/etc/caddy/conf.d";
 /// Main Caddyfile path
 pub const CADDYFILE_PATH: &str = "/usr/local/etc/caddy/Caddyfile";
 
+/// Directory for TLS certificates on remote host
+pub const CADDY_CERTS_DIR: &str = "/usr/local/etc/caddy/certs";
+
 /// Default ZFS pool name
 pub const DEFAULT_ZFS_POOL: &str = "zroot";
 

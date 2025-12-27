@@ -108,12 +108,53 @@ bsdeploy deploy
 | `user` | Unix user created inside jails to run the application |
 | `packages` | FreeBSD packages installed inside jails |
 | `mise` | Language runtimes installed inside jails via mise |
-| `proxy` | Caddy reverse proxy configuration |
+| `proxy` | Caddy reverse proxy configuration (see below) |
 | `env.clear` | Environment variables (stored in config) |
 | `env.secret` | Environment variables (read from local shell at deploy time) |
 | `before_start` | Commands run inside jail before starting (e.g., migrations) |
 | `start` | Commands to start your application (run as daemons) |
 | `data_directories` | Persistent directories mounted into jails |
+
+### Proxy Configuration
+
+The `proxy` section configures Caddy as a reverse proxy with TLS:
+
+```yaml
+proxy:
+  hostname: myapp.example.com
+  port: 3000
+```
+
+**TLS Options:**
+
+| Mode | Configuration | Description |
+|------|---------------|-------------|
+| ACME (default) | `tls: true` or omitted | Caddy automatically obtains Let's Encrypt certificates |
+| Disabled | `tls: false` | Plain HTTP, no TLS |
+| Custom SSL | `ssl: { ... }` | Use your own certificates |
+
+**Custom SSL Certificates:**
+
+When Let's Encrypt is not suitable (e.g., internal domains, specific CA requirements), you can provide your own certificates:
+
+```yaml
+proxy:
+  hostname: myapp.example.com
+  port: 3000
+  ssl:
+    certificate_pem: SSL_CERTIFICATE_PEM
+    private_key_pem: SSL_PRIVATE_KEY_PEM
+```
+
+The `certificate_pem` and `private_key_pem` values are environment variable names. Set them before deploying:
+
+```bash
+export SSL_CERTIFICATE_PEM="$(cat /path/to/cert.pem)"
+export SSL_PRIVATE_KEY_PEM="$(cat /path/to/key.pem)"
+bsdeploy deploy
+```
+
+Certificates are written to `/usr/local/etc/caddy/certs/` on the remote host with secure permissions.
 
 ## License
 

@@ -63,6 +63,17 @@ pub struct ProxyConfig {
     pub port: u16,
     #[serde(default = "default_true")]
     pub tls: bool,
+    /// Optional SSL certificate configuration (overrides ACME when present)
+    pub ssl: Option<SslConfig>,
+}
+
+/// SSL certificate configuration using secrets (environment variables)
+#[derive(Debug, Deserialize, Clone)]
+pub struct SslConfig {
+    /// Environment variable name containing certificate PEM
+    pub certificate_pem: String,
+    /// Environment variable name containing private key PEM
+    pub private_key_pem: String,
 }
 
 fn default_true() -> bool {
@@ -337,5 +348,62 @@ jail: {}
         let jail = config.jail.unwrap();
         assert!(jail.base_version.is_none());
         assert!(jail.ip_range.is_none());
+    }
+
+    #[test]
+    fn test_proxy_ssl_not_set_by_default() {
+        let config_yaml = r#"
+service: myapp
+hosts:
+  - example.com
+proxy:
+  hostname: myapp.example.com
+  port: 3000
+"#;
+        let config = Config::from_str(config_yaml).unwrap();
+        let proxy = config.proxy.unwrap();
+        assert!(proxy.ssl.is_none());
+        assert!(proxy.tls); // ACME enabled by default
+    }
+
+    #[test]
+    fn test_proxy_ssl_manual_certificates() {
+        let config_yaml = r#"
+service: myapp
+hosts:
+  - example.com
+proxy:
+  hostname: myapp.example.com
+  port: 3000
+  ssl:
+    certificate_pem: SSL_CERT
+    private_key_pem: SSL_KEY
+"#;
+        let config = Config::from_str(config_yaml).unwrap();
+        let proxy = config.proxy.unwrap();
+        let ssl = proxy.ssl.unwrap();
+        assert_eq!(ssl.certificate_pem, "SSL_CERT");
+        assert_eq!(ssl.private_key_pem, "SSL_KEY");
+    }
+
+    #[test]
+    fn test_proxy_ssl_with_tls_false() {
+        // SSL config takes precedence, tls:false is ignored when ssl is set
+        let config_yaml = r#"
+service: myapp
+hosts:
+  - example.com
+proxy:
+  hostname: myapp.example.com
+  port: 3000
+  tls: false
+  ssl:
+    certificate_pem: SSL_CERT
+    private_key_pem: SSL_KEY
+"#;
+        let config = Config::from_str(config_yaml).unwrap();
+        let proxy = config.proxy.unwrap();
+        assert!(proxy.ssl.is_some());
+        // Note: ssl being present means TLS is enabled with manual certs
     }
 }
