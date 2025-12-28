@@ -64,6 +64,10 @@ env:
   secret:
     - SECRET_KEY_BASE
 
+# Persistent directories mounted into jails (survives deploys)
+data_directories:
+  - /var/db/myapp/storage:/app/storage
+
 before_start:
   - bundle install
   - bin/rails db:migrate
