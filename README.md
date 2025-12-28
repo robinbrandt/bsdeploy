@@ -16,6 +16,7 @@ A non-exhaustive list:
 
 - **Multiple roles** for the application servers (worker servers)
 - **Accessories** (e.g. provisioning a database server)
+- **Parallel deployments to multiple hosts**
 - ...
 
 ## Installation
