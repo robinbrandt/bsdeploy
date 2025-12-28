@@ -1,21 +1,48 @@
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use log::debug;
-use std::io::Write;
+use std::io::{Read, Write};
+use wait_timeout::ChildExt;
 
 use crate::shell;
 
+/// Default timeout for SSH commands (15 minutes)
+/// Long timeout needed for operations like fetching base images, installing packages, building runtimes
+const SSH_TIMEOUT: Duration = Duration::from_secs(900);
+
 pub fn run(host: &str, command: &str) -> Result<()> {
     debug!("SSH [{}] Executing: {}", host, command);
-    let output = Command::new("ssh")
+
+    let mut child = Command::new("ssh")
         .arg(host)
         .arg(command)
-        .output() // Captures stdout/stderr
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("Failed to execute ssh command on {}", host))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    let status = match child.wait_timeout(SSH_TIMEOUT)
+        .with_context(|| format!("Failed to wait for ssh command on {}", host))?
+    {
+        Some(status) => status,
+        None => {
+            // Timeout - kill the process
+            child.kill().ok();
+            child.wait().ok();
+            return Err(anyhow!("SSH command timed out after {:?} on {}: {}", SSH_TIMEOUT, host, command));
+        }
+    };
+
+    if !status.success() {
+        let mut stderr = String::new();
+        let mut stdout = String::new();
+        if let Some(mut err) = child.stderr.take() {
+            err.read_to_string(&mut stderr).ok();
+        }
+        if let Some(mut out) = child.stdout.take() {
+            out.read_to_string(&mut stdout).ok();
+        }
         debug!("Stdout: {}", stdout);
         debug!("Stderr: {}", stderr);
         return Err(anyhow!("Command failed on {}: {}. Error: {}", host, command, stderr.trim()));
@@ -23,21 +50,42 @@ pub fn run(host: &str, command: &str) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn run_with_output(host: &str, command: &str) -> Result<String> {
     debug!("SSH [{}] Executing (output): {}", host, command);
-    let output = Command::new("ssh")
+
+    let mut child = Command::new("ssh")
         .arg(host)
         .arg(command)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("Failed to execute ssh command on {}", host))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let status = match child.wait_timeout(SSH_TIMEOUT)
+        .with_context(|| format!("Failed to wait for ssh command on {}", host))?
+    {
+        Some(status) => status,
+        None => {
+            child.kill().ok();
+            child.wait().ok();
+            return Err(anyhow!("SSH command timed out after {:?} on {}: {}", SSH_TIMEOUT, host, command));
+        }
+    };
+
+    let mut stdout = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_string(&mut stdout).ok();
+    }
+
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut err) = child.stderr.take() {
+            err.read_to_string(&mut stderr).ok();
+        }
         return Err(anyhow!("Command failed on {}: {}. Error: {}", host, command, stderr));
     }
-    
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+
+    Ok(stdout)
 }
 
 pub fn get_os_release(host: &str) -> Result<String> {
@@ -69,10 +117,22 @@ pub fn write_file(host: &str, content: &str, dest_path: &str, use_doas: bool) ->
             .with_context(|| "Failed to write content to ssh stdin")?;
     }
 
-    let output = child.wait_with_output().with_context(|| "Failed to wait for ssh process")?;
-    
-    if !output.status.success() {
-         let stderr = String::from_utf8_lossy(&output.stderr);
+    let status = match child.wait_timeout(SSH_TIMEOUT)
+        .with_context(|| "Failed to wait for ssh process")?
+    {
+        Some(status) => status,
+        None => {
+            child.kill().ok();
+            child.wait().ok();
+            return Err(anyhow!("SSH write_file timed out after {:?} on {}: {}", SSH_TIMEOUT, host, dest_path));
+        }
+    };
+
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut err) = child.stderr.take() {
+            err.read_to_string(&mut stderr).ok();
+        }
         return Err(anyhow!("Failed to write file {} on {}: {}", dest_path, host, stderr.trim()));
     }
     Ok(())
