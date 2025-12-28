@@ -30,6 +30,8 @@ enum Commands {
     Setup,
     /// Deploy the application
     Deploy,
+    /// Show status of jails and services
+    Status,
     /// Destroy all resources associated with the service on the remote hosts
     Destroy,
 }
@@ -42,7 +44,7 @@ fn main() -> Result<()> {
         Commands::Init => {
             commands::init(&cli.config)?;
         }
-        Commands::Setup | Commands::Deploy | Commands::Destroy => {
+        Commands::Setup | Commands::Deploy | Commands::Status | Commands::Destroy => {
             let config = match config::Config::load(&cli.config) {
                 Ok(c) => c,
                 Err(e) => {
@@ -59,6 +61,7 @@ fn main() -> Result<()> {
             match cli.command {
                 Commands::Setup => commands::setup(&config)?,
                 Commands::Deploy => commands::deploy(&config)?,
+                Commands::Status => commands::status(&config)?,
                 Commands::Destroy => commands::destroy(&config)?,
                 Commands::Init => unreachable!(),
             }
