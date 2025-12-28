@@ -55,34 +55,89 @@ fn deploy_to_host(config: &Config, host: &str, spinner: &ProgressBar) -> Result<
 
     let cmd_prefix = if config.doas { "doas " } else { "" };
 
+    // Run remaining deployment steps, cleaning up the jail on failure
+    let result = deploy_jail_steps(config, host, &jail_info, cmd_prefix, spinner);
+
+    if let Err(ref e) = result {
+        spinner.set_message(format!("[{}] Deployment failed, cleaning up jail {}...", host, jail_info.name));
+        cleanup_failed_jail(host, &jail_info, cmd_prefix);
+        spinner.set_message(format!("[{}] Cleanup complete. Error: {}", host, e));
+    }
+
+    result
+}
+
+/// Execute deployment steps after jail creation. Returns error if any step fails.
+fn deploy_jail_steps(
+    config: &Config,
+    host: &str,
+    jail_info: &jail::JailInfo,
+    cmd_prefix: &str,
+    spinner: &ProgressBar,
+) -> Result<()> {
     // 5. Start Jail (Phase 1: Inherit IP for build hooks)
-    start_jail_build_phase(config, host, &jail_info, cmd_prefix, spinner)?;
+    start_jail_build_phase(config, host, jail_info, cmd_prefix, spinner)?;
 
     // 6. Sync application code
-    sync_application(config, host, &jail_info, cmd_prefix, spinner)?;
+    sync_application(config, host, jail_info, cmd_prefix, spinner)?;
 
     // 7. Configure environment
-    configure_environment(config, host, &jail_info, cmd_prefix)?;
+    configure_environment(config, host, jail_info, cmd_prefix)?;
 
     // 8. Run before_start hooks
-    run_before_start_hooks(config, host, &jail_info, cmd_prefix, spinner)?;
+    run_before_start_hooks(config, host, jail_info, cmd_prefix, spinner)?;
 
     // 9. Restart jail with private networking
-    restart_jail_production(config, host, &jail_info, cmd_prefix, spinner)?;
+    restart_jail_production(config, host, jail_info, cmd_prefix, spinner)?;
 
     // 10. Start services
-    start_services(config, host, &jail_info, cmd_prefix, spinner)?;
+    start_services(config, host, jail_info, cmd_prefix, spinner)?;
 
     // 11. Update proxy configuration
-    update_proxy(config, host, &jail_info, cmd_prefix, spinner)?;
+    update_proxy(config, host, jail_info, cmd_prefix, spinner)?;
 
     // 12. Stop old jails
-    stop_old_jails(config, host, &jail_info, cmd_prefix, spinner)?;
+    stop_old_jails(config, host, jail_info, cmd_prefix, spinner)?;
 
     // 13. Prune old jails
-    prune_old_jails(config, host, &jail_info, cmd_prefix, spinner)?;
+    prune_old_jails(config, host, jail_info, cmd_prefix, spinner)?;
 
     Ok(())
+}
+
+/// Clean up a failed jail deployment: stop jail, remove IP alias, unmount, remove directory
+fn cleanup_failed_jail(host: &str, jail_info: &jail::JailInfo, cmd_prefix: &str) {
+    // Stop jail if running
+    remote::run(host, &format!("{}jail -r {} 2>/dev/null", cmd_prefix, jail_info.name)).ok();
+
+    // Remove IP alias
+    if !jail_info.ip.is_empty() {
+        remote::run(
+            host,
+            &format!("{}ifconfig lo1 inet {} -alias 2>/dev/null", cmd_prefix, jail_info.ip),
+        ).ok();
+    }
+
+    // Unmount all filesystems under jail path
+    let mount_check = format!("mount | grep '{}' | awk '{{print $3}}'", jail_info.path);
+    if let Ok(mounts) = remote::run_with_output(host, &mount_check) {
+        // Unmount in reverse order (deepest first)
+        for mnt in mounts.lines().rev() {
+            let mnt = mnt.trim();
+            if !mnt.is_empty() {
+                remote::run(host, &format!("{}umount -f {}", cmd_prefix, mnt)).ok();
+            }
+        }
+    }
+
+    // Remove jail directory or ZFS dataset
+    if let Ok(Some(dataset)) = remote::get_zfs_dataset(host, &jail_info.path) {
+        remote::run(host, &format!("{}zfs destroy -r {}", cmd_prefix, dataset)).ok();
+    }
+
+    // Remove directory (handles non-ZFS case or if ZFS destroy failed)
+    remote::run(host, &format!("{}chflags -R noschg {}", cmd_prefix, jail_info.path)).ok();
+    remote::run(host, &format!("{}rm -rf {}", cmd_prefix, jail_info.path)).ok();
 }
 
 fn determine_base_version(config: &Config, host: &str) -> Result<String> {
