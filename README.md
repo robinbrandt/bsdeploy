@@ -1,6 +1,6 @@
 # bsdeploy
 
-A deployment tool for FreeBSD using jails. Inspired by [Kamal](https://kamal-deploy.org/), but instead of Linux and Docker, it uses FreeBSD and jails.
+A deployment tool to FreeBSD servers using jails. Inspired by [Kamal](https://kamal-deploy.org/), but instead of Linux and Docker, it uses FreeBSD and jails. Supports only a small subset that I need for deploying side projects and some open source software on a root server.
 
 ## Features
 
@@ -9,6 +9,14 @@ A deployment tool for FreeBSD using jails. Inspired by [Kamal](https://kamal-dep
 - **Caddy integration** for automatic HTTPS and reverse proxying
 - **mise support** for managing language runtimes (Ruby, Node, Python, etc.)
 - **Environment management** with clear and secret variables
+
+## Current not supported
+
+A non-exhaustive list:
+
+- **Multiple roles** for the application servers (worker servers)
+- **Accessories** (e.g. provisioning a database server)
+- ...
 
 ## Installation
 
