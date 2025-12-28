@@ -1,3 +1,4 @@
+use crate::commands::maybe_doas;
 use crate::constants::*;
 use crate::{config, remote, shell};
 use anyhow::Result;
@@ -8,7 +9,7 @@ use indicatif::ProgressBar;
 pub fn get_image_hash(config: &config::Config, base_version: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(base_version.as_bytes());
-    
+
     // Hash packages (sorted)
     let mut pkgs = config.packages.clone();
     pkgs.sort();
@@ -32,14 +33,6 @@ pub fn get_image_hash(config: &config::Config, base_version: &str) -> String {
     }
 
     hex::encode(hasher.finalize())
-}
-
-fn maybe_doas(cmd: &str, doas: bool) -> String {
-    if doas {
-        format!("doas {}", cmd)
-    } else {
-        cmd.to_string()
-    }
 }
 
 pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spinner: &ProgressBar) -> Result<String> {

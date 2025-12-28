@@ -3,7 +3,7 @@ use indicatif::ProgressBar;
 
 use crate::config::Config;
 use crate::constants::*;
-use crate::{image, jail, remote, shell, ui};
+use crate::{caddy, image, jail, remote, shell, ui};
 
 pub fn run(config: &Config) -> Result<()> {
     ui::print_step(&format!("Running deploy for {} hosts", config.hosts.len()));
@@ -424,10 +424,11 @@ fn update_proxy(
         // Update SSL certificates if configured (they may have been rotated)
         if let Some(ssl) = &proxy.ssl {
             spinner.set_message(format!("[{}] Updating TLS certificates...", host));
-            write_ssl_certificates(config, host, ssl, cmd_prefix)?;
+            caddy::write_ssl_certificates(config, host, ssl)?;
         }
 
-        let proxy_conf_content = generate_caddyfile(proxy, &config.service, &format!("{}:{}", jail_info.ip, proxy.port));
+        let backend = format!("{}:{}", jail_info.ip, proxy.port);
+        let proxy_conf_content = caddy::generate_caddyfile(proxy, &config.service, &backend);
 
         let caddy_conf_path = format!("{}/{}.caddy", CADDY_CONF_DIR, config.service);
         remote::write_file(host, &proxy_conf_content, &caddy_conf_path, config.doas)?;
@@ -435,84 +436,6 @@ fn update_proxy(
     }
 
     Ok(())
-}
-
-/// Write SSL certificates from environment variables to remote host
-fn write_ssl_certificates(
-    config: &Config,
-    host: &str,
-    ssl: &crate::config::SslConfig,
-    cmd_prefix: &str,
-) -> anyhow::Result<()> {
-    use anyhow::Context;
-
-    // Ensure certs directory exists
-    remote::run(
-        host,
-        &format!("{}mkdir -p {}", cmd_prefix, CADDY_CERTS_DIR),
-    )?;
-
-    // Read certificate from environment variable
-    let cert_content = std::env::var(&ssl.certificate_pem).with_context(|| {
-        format!(
-            "Missing SSL certificate environment variable: {}",
-            ssl.certificate_pem
-        )
-    })?;
-
-    // Read private key from environment variable
-    let key_content = std::env::var(&ssl.private_key_pem).with_context(|| {
-        format!(
-            "Missing SSL private key environment variable: {}",
-            ssl.private_key_pem
-        )
-    })?;
-
-    let cert_path = format!("{}/{}.crt", CADDY_CERTS_DIR, config.service);
-    let key_path = format!("{}/{}.key", CADDY_CERTS_DIR, config.service);
-
-    // Write certificate
-    remote::write_file(host, &cert_content, &cert_path, config.doas)?;
-
-    // Write private key
-    remote::write_file(host, &key_content, &key_path, config.doas)?;
-
-    // Set secure permissions (600) and ownership to www (Caddy user on FreeBSD)
-    remote::run(
-        host,
-        &format!("{}chmod 600 {} {}", cmd_prefix, cert_path, key_path),
-    )?;
-    remote::run(
-        host,
-        &format!("{}chown www:www {} {}", cmd_prefix, cert_path, key_path),
-    )?;
-
-    Ok(())
-}
-
-/// Generate Caddyfile content for a proxy configuration
-fn generate_caddyfile(proxy: &crate::config::ProxyConfig, service: &str, backend: &str) -> String {
-    // Determine hostname format based on TLS mode
-    let hostname = if proxy.ssl.is_some() || proxy.tls {
-        proxy.hostname.clone()
-    } else {
-        format!("http://{}", proxy.hostname)
-    };
-
-    let mut content = format!("{} {{\n", hostname);
-
-    // Add TLS directive for manual certificates
-    if proxy.ssl.is_some() {
-        content.push_str(&format!(
-            "    tls {}/{}.crt {}/{}.key\n",
-            CADDY_CERTS_DIR, service, CADDY_CERTS_DIR, service
-        ));
-    }
-
-    content.push_str(&format!("    reverse_proxy {}\n", backend));
-    content.push_str("}\n");
-
-    content
 }
 
 fn stop_old_jails(
