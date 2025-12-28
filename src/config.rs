@@ -89,6 +89,24 @@ pub struct EnvConfig {
 }
 
 impl Config {
+    /// Validate that a service name contains only safe characters.
+    /// Allowed: lowercase letters, digits, and hyphens (not at start/end).
+    fn validate_service_name(name: &str) -> Result<()> {
+        if name.is_empty() {
+            anyhow::bail!("Service name cannot be empty");
+        }
+        if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            anyhow::bail!(
+                "Service name '{}' contains invalid characters. Only lowercase letters, digits, and hyphens are allowed.",
+                name
+            );
+        }
+        if name.starts_with('-') || name.ends_with('-') {
+            anyhow::bail!("Service name '{}' cannot start or end with a hyphen", name);
+        }
+        Ok(())
+    }
+
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config file: {:?}", path.as_ref()))?;
@@ -104,6 +122,9 @@ impl Config {
 
         let config: Config = serde_yaml::from_str(&content)
             .with_context(|| "Failed to parse YAML config")?;
+
+        Self::validate_service_name(&config.service)?;
+
         Ok(config)
     }
 
@@ -119,6 +140,9 @@ impl Config {
         }
         let config: Config = serde_yaml::from_str(content)
             .with_context(|| "Failed to parse YAML config")?;
+
+        Self::validate_service_name(&config.service)?;
+
         Ok(config)
     }
 }
@@ -405,5 +429,62 @@ proxy:
         let proxy = config.proxy.unwrap();
         assert!(proxy.ssl.is_some());
         // Note: ssl being present means TLS is enabled with manual certs
+    }
+
+    #[test]
+    fn test_service_name_valid() {
+        let config_yaml = r#"
+service: my-app-123
+hosts:
+  - example.com
+"#;
+        let config = Config::from_str(config_yaml).unwrap();
+        assert_eq!(config.service, "my-app-123");
+    }
+
+    #[test]
+    fn test_service_name_invalid_uppercase() {
+        let config_yaml = r#"
+service: MyApp
+hosts:
+  - example.com
+"#;
+        let result = Config::from_str(config_yaml);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn test_service_name_invalid_spaces() {
+        let config_yaml = r#"
+service: my app
+hosts:
+  - example.com
+"#;
+        let result = Config::from_str(config_yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_service_name_invalid_leading_hyphen() {
+        let config_yaml = r#"
+service: -myapp
+hosts:
+  - example.com
+"#;
+        let result = Config::from_str(config_yaml);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot start or end with a hyphen"));
+    }
+
+    #[test]
+    fn test_service_name_invalid_special_chars() {
+        let config_yaml = r#"
+service: my.app
+hosts:
+  - example.com
+"#;
+        let result = Config::from_str(config_yaml);
+        assert!(result.is_err());
     }
 }

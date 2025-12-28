@@ -3,6 +3,8 @@ use anyhow::{Context, Result, anyhow};
 use log::debug;
 use std::io::Write;
 
+use crate::shell;
+
 pub fn run(host: &str, command: &str) -> Result<()> {
     debug!("SSH [{}] Executing: {}", host, command);
     let output = Command::new("ssh")
@@ -45,11 +47,12 @@ pub fn get_os_release(host: &str) -> Result<String> {
 
 pub fn write_file(host: &str, content: &str, dest_path: &str, use_doas: bool) -> Result<()> {
     debug!("SSH [{}] Writing file: {}", host, dest_path);
-    
+
+    let safe_path = shell::escape(dest_path);
     let remote_cmd = if use_doas {
-        format!("doas tee {} > /dev/null", dest_path)
+        format!("doas tee {} > /dev/null", safe_path)
     } else {
-        format!("cat > {}", dest_path)
+        format!("cat > {}", safe_path)
     };
 
     let mut child = Command::new("ssh")
@@ -112,9 +115,10 @@ pub fn sync(host: &str, src: &str, dest: &str, excludes: &[String], use_doas: bo
 /// Detect if a path is on a ZFS dataset and return the dataset name
 pub fn get_zfs_dataset(host: &str, path: &str) -> Result<Option<String>> {
     // 1. Find the mountpoint for the path using df
-    // df -p is POSIX but might not give exactly what we want. 
+    // df -p is POSIX but might not give exactly what we want.
     // On FreeBSD, 'df <path>' shows the mountpoint in the first column if it's a device/dataset.
-    let df_cmd = format!("df {} | tail -n 1 | awk '{{print $1}}'", path);
+    let safe_path = shell::escape(path);
+    let df_cmd = format!("df {} | tail -n 1 | awk '{{print $1}}'", safe_path);
     let dataset_candidate = match run_with_output(host, &df_cmd) {
         Ok(out) => out.trim().to_string(),
         Err(_) => return Ok(None),
