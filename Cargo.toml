@@ -2,6 +2,10 @@
 name = "bsdeploy"
 version = "0.1.0"
 edition = "2024"
+authors = ["Robin Brandt <robin@evernet2000.de>"]
+description = "A deployment tool to FreeBSD servers using jails."
+license = "MIT"
+repository = "https://github.com/robinbrandt/bsdeploy"
 
 [dependencies]
 anyhow = "1.0.100"
