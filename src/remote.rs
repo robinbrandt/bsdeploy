@@ -212,11 +212,12 @@ pub fn get_zfs_dataset(host: &str, path: &str) -> Result<Option<String>> {
     }
 
     // 2. Verify it's a ZFS dataset
-    let zfs_cmd = format!("zfs list -H -o name {} 2>/dev/null", dataset_candidate);
+    let safe_dataset = shell::escape(&dataset_candidate);
+    let zfs_cmd = format!("zfs list -H -o name {} 2>/dev/null", safe_dataset);
     let output = match run_with_output(host, &zfs_cmd) {
         Ok(out) => out,
         Err(_) => {
-            let doas_cmd = format!("doas zfs list -H -o name {} 2>/dev/null", dataset_candidate);
+            let doas_cmd = format!("doas zfs list -H -o name {} 2>/dev/null", safe_dataset);
             match run_with_output(host, &doas_cmd) {
                 Ok(out) => out,
                 Err(_) => return Ok(None),
