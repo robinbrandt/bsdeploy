@@ -11,7 +11,7 @@ The deployment is defined in `config/bsdeploy.yml` at the root of the applicatio
 service: myapp
 
 hosts:
-  - bsd.localdomain
+  - your-server.example.com
 
 # Jail-specific configuration (optional, with defaults)
 jail:

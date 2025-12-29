@@ -1,12 +1,12 @@
 service: app2
 hosts:
-  - bsd.localdomain
+  - your-server.example.com
 doas: true
 user: app2
 jail:
   ip_range: "10.0.0.0/24"
 proxy:
-  hostname: app2.local
+  hostname: app2.example.com
   port: 3002
 packages:
   - curl
