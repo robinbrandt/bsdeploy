@@ -241,7 +241,7 @@ fn configure_environment(
     config: &Config,
     host: &str,
     jail_info: &jail::JailInfo,
-    _cmd_prefix: &str,
+    cmd_prefix: &str,
 ) -> Result<()> {
     let mut env_content = String::new();
 
@@ -262,6 +262,26 @@ fn configure_environment(
 
     let env_path = format!("{}{}", jail_info.path, JAIL_ENV_FILE);
     remote::write_file(host, &env_content, &env_path, config.doas)?;
+
+    // Restrict env file permissions - contains secrets
+    // Use jexec so user lookup happens against jail's /etc/passwd
+    if let Some(user) = &config.user {
+        let safe_user = shell::escape(user);
+        remote::run(
+            host,
+            &format!(
+                "{}jexec {} chown {} {}",
+                cmd_prefix, jail_info.name, safe_user, JAIL_ENV_FILE
+            ),
+        )?;
+    }
+    remote::run(
+        host,
+        &format!(
+            "{}jexec {} chmod 600 {}",
+            cmd_prefix, jail_info.name, JAIL_ENV_FILE
+        ),
+    )?;
 
     Ok(())
 }

@@ -81,6 +81,19 @@ fn setup_host(
     let env_path = format!("{}/env", config_dir);
     remote::write_file(host, env_content, &env_path, config.doas)?;
 
+    // Restrict env file permissions - contains secrets
+    if let Some(user) = &config.user {
+        let safe_user = shell::escape(user);
+        remote::run(
+            host,
+            &maybe_doas(&format!("chown {} {}", safe_user, env_path), config.doas),
+        )?;
+    }
+    remote::run(
+        host,
+        &maybe_doas(&format!("chmod 600 {}", env_path), config.doas),
+    )?;
+
     // 8. Setup Caddy
     setup_caddy(config, host, spinner)?;
 
@@ -94,10 +107,14 @@ fn setup_user(config: &Config, host: &str, spinner: &indicatif::ProgressBar) -> 
 
         let check_user = remote::run(host, &format!("id {}", safe_user));
         if check_user.is_err() {
+            // Create as a non-login system user (for file ownership only)
             remote::run(
                 host,
                 &maybe_doas(
-                    &format!("pw useradd -n {} -m -s /usr/local/bin/bash", safe_user),
+                    &format!(
+                        "pw useradd -n {} -d /nonexistent -s /usr/sbin/nologin -c 'bsdeploy service account'",
+                        safe_user
+                    ),
                     config.doas,
                 ),
             )?;

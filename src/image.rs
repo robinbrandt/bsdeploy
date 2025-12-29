@@ -132,12 +132,19 @@ pub fn ensure_image(config: &config::Config, host: &str, base_version: &str, spi
             remote::run(host, &format!("{}pkg -j {} install -y {}", cmd_prefix, build_jail_name, pkgs))?;
         }
 
-        // Create User
+        // Create User (with same UID as host user for consistent file ownership)
         if let Some(user) = &config.user {
             let safe_user = shell::escape(user);
             let check_user = format!("{}jexec {} id {}", cmd_prefix, build_jail_name, safe_user);
             if remote::run(host, &check_user).is_err() {
-                remote::run(host, &format!("{}jexec {} pw useradd -n {} -m -s /usr/local/bin/bash", cmd_prefix, build_jail_name, safe_user))?;
+                // Get UID from host user (created during setup) to ensure consistent ownership
+                let host_uid = remote::run_with_output(host, &format!("id -u {}", safe_user))?
+                    .trim()
+                    .to_string();
+                remote::run(host, &format!(
+                    "{}jexec {} pw useradd -n {} -u {} -m -s /usr/local/bin/bash",
+                    cmd_prefix, build_jail_name, safe_user, host_uid
+                ))?;
             }
         }
 
