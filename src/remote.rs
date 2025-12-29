@@ -17,10 +17,20 @@ pub fn run(host: &str, command: &str) -> Result<()> {
     let mut child = Command::new("ssh")
         .arg(host)
         .arg(command)
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("Failed to execute ssh command on {}", host))?;
+
+    // Drain stderr in background to prevent pipe buffer deadlock
+    let stderr_handle = child.stderr.take();
+    let stderr_thread = std::thread::spawn(move || {
+        let mut stderr = String::new();
+        if let Some(mut err) = stderr_handle {
+            err.read_to_string(&mut stderr).ok();
+        }
+        stderr
+    });
 
     let status = match child.wait_timeout(SSH_TIMEOUT)
         .with_context(|| format!("Failed to wait for ssh command on {}", host))?
@@ -35,15 +45,7 @@ pub fn run(host: &str, command: &str) -> Result<()> {
     };
 
     if !status.success() {
-        let mut stderr = String::new();
-        let mut stdout = String::new();
-        if let Some(mut err) = child.stderr.take() {
-            err.read_to_string(&mut stderr).ok();
-        }
-        if let Some(mut out) = child.stdout.take() {
-            out.read_to_string(&mut stdout).ok();
-        }
-        debug!("Stdout: {}", stdout);
+        let stderr = stderr_thread.join().unwrap_or_default();
         debug!("Stderr: {}", stderr);
         return Err(anyhow!("Command failed on {}: {}. Error: {}", host, command, stderr.trim()));
     }
@@ -61,6 +63,25 @@ pub fn run_with_output(host: &str, command: &str) -> Result<String> {
         .spawn()
         .with_context(|| format!("Failed to execute ssh command on {}", host))?;
 
+    // Drain stdout and stderr in background threads to prevent pipe buffer deadlock
+    let stdout_handle = child.stdout.take();
+    let stdout_thread = std::thread::spawn(move || {
+        let mut stdout = String::new();
+        if let Some(mut out) = stdout_handle {
+            out.read_to_string(&mut stdout).ok();
+        }
+        stdout
+    });
+
+    let stderr_handle = child.stderr.take();
+    let stderr_thread = std::thread::spawn(move || {
+        let mut stderr = String::new();
+        if let Some(mut err) = stderr_handle {
+            err.read_to_string(&mut stderr).ok();
+        }
+        stderr
+    });
+
     let status = match child.wait_timeout(SSH_TIMEOUT)
         .with_context(|| format!("Failed to wait for ssh command on {}", host))?
     {
@@ -72,16 +93,10 @@ pub fn run_with_output(host: &str, command: &str) -> Result<String> {
         }
     };
 
-    let mut stdout = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        out.read_to_string(&mut stdout).ok();
-    }
+    let stdout = stdout_thread.join().unwrap_or_default();
 
     if !status.success() {
-        let mut stderr = String::new();
-        if let Some(mut err) = child.stderr.take() {
-            err.read_to_string(&mut stderr).ok();
-        }
+        let stderr = stderr_thread.join().unwrap_or_default();
         return Err(anyhow!("Command failed on {}: {}. Error: {}", host, command, stderr));
     }
 
@@ -112,6 +127,16 @@ pub fn write_file(host: &str, content: &str, dest_path: &str, use_doas: bool) ->
         .spawn()
         .with_context(|| format!("Failed to spawn ssh for file writing on {}", host))?;
 
+    // Drain stderr in background to prevent pipe buffer deadlock
+    let stderr_handle = child.stderr.take();
+    let stderr_thread = std::thread::spawn(move || {
+        let mut stderr = String::new();
+        if let Some(mut err) = stderr_handle {
+            err.read_to_string(&mut stderr).ok();
+        }
+        stderr
+    });
+
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(content.as_bytes())
             .with_context(|| "Failed to write content to ssh stdin")?;
@@ -129,10 +154,7 @@ pub fn write_file(host: &str, content: &str, dest_path: &str, use_doas: bool) ->
     };
 
     if !status.success() {
-        let mut stderr = String::new();
-        if let Some(mut err) = child.stderr.take() {
-            err.read_to_string(&mut stderr).ok();
-        }
+        let stderr = stderr_thread.join().unwrap_or_default();
         return Err(anyhow!("Failed to write file {} on {}: {}", dest_path, host, stderr.trim()));
     }
     Ok(())
