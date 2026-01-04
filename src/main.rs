@@ -28,7 +28,11 @@ enum Commands {
     /// Initialize a new configuration file
     Init,
     /// Setup the remote hosts
-    Setup,
+    Setup {
+        /// Force reconfiguration of PF even if already configured
+        #[arg(long)]
+        force_pf: bool,
+    },
     /// Deploy the application
     Deploy,
     /// Show status of jails and services
@@ -45,7 +49,7 @@ fn main() -> Result<()> {
         Commands::Init => {
             commands::init(&cli.config)?;
         }
-        Commands::Setup | Commands::Deploy | Commands::Status | Commands::Destroy => {
+        Commands::Setup { .. } | Commands::Deploy | Commands::Status | Commands::Destroy => {
             let config = match config::Config::load(&cli.config) {
                 Ok(c) => c,
                 Err(e) => {
@@ -60,7 +64,7 @@ fn main() -> Result<()> {
             ));
 
             match cli.command {
-                Commands::Setup => commands::setup(&config)?,
+                Commands::Setup { force_pf } => commands::setup(&config, force_pf)?,
                 Commands::Deploy => commands::deploy(&config)?,
                 Commands::Status => commands::status(&config)?,
                 Commands::Destroy => commands::destroy(&config)?,
