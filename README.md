@@ -9,6 +9,7 @@ A deployment tool to FreeBSD servers using jails. Inspired by [Kamal](https://ka
 - **Caddy integration** for automatic HTTPS and reverse proxying
 - **mise support** for managing language runtimes (Ruby, Node, Python, etc.)
 - **Environment management** with clear and secret variables
+- **PF firewall configuration** for jail NAT (outbound traffic)
 
 ## Current not supported
 
@@ -94,13 +95,21 @@ bsdeploy deploy
 | Command | Description |
 |---------|-------------|
 | `bsdeploy init` | Create a new configuration file |
-| `bsdeploy setup` | Prepare remote hosts (install Caddy, configure directories) |
+| `bsdeploy setup` | Prepare remote hosts (install Caddy, configure PF, etc.) |
 | `bsdeploy deploy` | Build and deploy the application |
 | `bsdeploy destroy` | Remove all resources for the service |
 
+### Setup Options
+
+| Option | Description |
+|--------|-------------|
+| `--force-pf` | Append bsdeploy PF rules to an existing `/etc/pf.conf` |
+
+By default, `bsdeploy setup` will fail if the host already has a custom `/etc/pf.conf` to avoid overwriting existing firewall rules. Use `--force-pf` to prepend the NAT rules required for jail traffic.
+
 ## How It Works
 
-1. **Setup** installs host-level packages (Caddy, rsync, git, bash), creates directories, and configures the reverse proxy on each host
+1. **Setup** installs host-level packages (Caddy, rsync, git, bash), creates directories, configures the reverse proxy, and sets up PF for jail NAT on each host
 2. **Deploy**:
    - Builds a reusable jail image containing your packages and mise tools
    - Creates a new jail from the image
@@ -127,6 +136,7 @@ bsdeploy deploy
 | `before_start` | Commands run inside jail before starting (e.g., migrations) |
 | `start` | Commands to start your application (run as daemons) |
 | `data_directories` | Persistent directories mounted into jails |
+| `jail.ip_range` | IP range for jails (default: `10.0.0.0/24`, used for PF NAT) |
 
 ### Proxy Configuration
 
