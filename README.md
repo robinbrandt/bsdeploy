@@ -10,6 +10,7 @@ A deployment tool to FreeBSD servers using jails. Inspired by [Kamal](https://ka
 - **mise support** for managing language runtimes (Ruby, Node, Python, etc.)
 - **Environment management** with clear and secret variables
 - **PF firewall configuration** for jail NAT (outbound traffic)
+- **Boot persistence** via rc.d service (jails automatically restart after reboot)
 
 ## Current not supported
 
@@ -119,6 +120,25 @@ By default, `bsdeploy setup` will fail if the host already has a custom `/etc/pf
    - Switches Caddy to route traffic to the new jail
    - Gracefully stops old jails
 3. Old jails are kept for rollback and eventually pruned
+
+## Boot Persistence
+
+Deployed jails automatically restart after a system reboot. During `bsdeploy setup`, an rc.d service is installed and enabled. Each deploy writes metadata to the jail that allows the service to reconstruct the jail environment on boot.
+
+**Service commands** (run on the remote host):
+
+| Command | Description |
+|---------|-------------|
+| `service bsdeploy start` | Start all active jails |
+| `service bsdeploy stop` | Stop all active jails |
+| `service bsdeploy status` | Show status of all active jails |
+| `service bsdeploy restart` | Restart all active jails |
+
+The service handles:
+- Creating the loopback interface (`lo1`) and IP aliases
+- Mounting base system, image, and data directories
+- Starting the jail and application processes
+- Proper shutdown and unmounting on stop
 
 ## Configuration Reference
 
