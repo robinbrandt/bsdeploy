@@ -10,6 +10,9 @@ pub const IMAGES_DIR: &str = "/usr/local/bsdeploy/images";
 /// Directory for storing jail instances
 pub const JAILS_DIR: &str = "/usr/local/bsdeploy/jails";
 
+/// Directory for active jail symlinks (for boot persistence)
+pub const ACTIVE_DIR: &str = "/usr/local/bsdeploy/active";
+
 /// Default IP range for jail networking (CIDR notation)
 pub const DEFAULT_IP_RANGE: &str = "10.0.0.0/24";
 

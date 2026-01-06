@@ -104,6 +104,7 @@ pub struct JailInfo {
     pub name: String,
     pub path: String,
     pub ip: String,
+    pub zfs: bool,
 }
 
 pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image_path: Option<&str>, data_dirs: &[crate::config::DataDirectory], doas: bool) -> Result<JailInfo> {
@@ -242,5 +243,6 @@ pub fn create(host: &str, service: &str, base_version: &str, subnet: &str, image
         name: jail_name,
         path: jail_root,
         ip,
+        zfs: zfs_cloned,
     })
 }

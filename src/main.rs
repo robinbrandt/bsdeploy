@@ -4,6 +4,7 @@ mod config;
 mod constants;
 mod image;
 mod jail;
+mod rcd;
 mod remote;
 mod shell;
 mod ui;

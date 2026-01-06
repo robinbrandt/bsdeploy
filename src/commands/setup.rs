@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 
 use crate::config::Config;
 use crate::constants::*;
-use crate::{caddy, remote, shell, ui};
+use crate::{caddy, rcd, remote, shell, ui};
 
 use super::maybe_doas;
 
@@ -56,11 +56,11 @@ fn setup_host(
     spinner.set_message(format!("[{}] Updating pkg repositories...", host));
     remote::run(host, &maybe_doas("pkg update", config.doas))?;
 
-    // 2. Install default packages
+    // 2. Install default packages (jq needed for rc.d script JSON parsing)
     spinner.set_message(format!("[{}] Installing default packages...", host));
     remote::run(
         host,
-        &maybe_doas("pkg install -y caddy rsync git bash", config.doas),
+        &maybe_doas("pkg install -y caddy rsync git bash jq", config.doas),
     )?;
 
     // 3. Create user if needed
@@ -100,6 +100,9 @@ fn setup_host(
 
     // 9. Setup PF for jail NAT
     setup_pf(config, host, force_pf, spinner)?;
+
+    // 10. Install rc.d script for boot persistence
+    setup_rcd(config, host, spinner)?;
 
     Ok(())
 }
@@ -432,6 +435,16 @@ nat on $ext_if from $jail_net to any -> ($ext_if)
 
     // Ensure PF is enabled (pfctl -e is idempotent)
     remote::run(host, &maybe_doas("pfctl -e 2>/dev/null || true", config.doas))?;
+
+    Ok(())
+}
+
+fn setup_rcd(config: &Config, host: &str, spinner: &indicatif::ProgressBar) -> Result<()> {
+    spinner.set_message(format!("[{}] Installing boot persistence script...", host));
+
+    rcd::install_rcd_script(host, config.doas)?;
+    rcd::enable_service(host, config.doas)?;
+    rcd::ensure_active_dir(host, config.doas)?;
 
     Ok(())
 }

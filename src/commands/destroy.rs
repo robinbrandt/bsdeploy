@@ -29,7 +29,10 @@ fn destroy_host(config: &Config, host: &str, spinner: &indicatif::ProgressBar) -
     // 1. Find and remove jails
     remove_jails(config, host, cmd_prefix, spinner)?;
 
-    // 2. Remove Caddy proxy config
+    // 2. Remove active symlink
+    remove_active_symlink(config, host, cmd_prefix, spinner)?;
+
+    // 3. Remove Caddy proxy config
     remove_proxy_config(config, host, cmd_prefix, spinner)?;
 
     Ok(())
@@ -92,6 +95,20 @@ fn remove_jails(
             remote::run(host, &format!("{}rm -rf {}", cmd_prefix, jpath)).ok();
         }
     }
+
+    Ok(())
+}
+
+fn remove_active_symlink(
+    config: &Config,
+    host: &str,
+    cmd_prefix: &str,
+    spinner: &indicatif::ProgressBar,
+) -> Result<()> {
+    spinner.set_message(format!("[{}] Removing active symlink...", host));
+
+    let symlink_path = format!("{}/{}", ACTIVE_DIR, config.service);
+    remote::run(host, &format!("{}rm -f {}", cmd_prefix, symlink_path)).ok();
 
     Ok(())
 }

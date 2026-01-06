@@ -1,9 +1,32 @@
 use anyhow::Result;
 use indicatif::ProgressBar;
+use serde::Serialize;
 
 use crate::config::Config;
 use crate::constants::*;
 use crate::{caddy, image, jail, remote, shell, ui};
+
+/// Metadata stored in each jail for boot persistence
+#[derive(Serialize)]
+struct JailMetadata {
+    service: String,
+    jail_name: String,
+    ip: String,
+    user: Option<String>,
+    start_commands: Vec<String>,
+    env_file: String,
+    app_dir: String,
+    data_directories: Vec<DataDirectoryMapping>,
+    base_version: String,
+    image_path: Option<String>,
+    zfs: bool,
+}
+
+#[derive(Serialize)]
+struct DataDirectoryMapping {
+    host_path: String,
+    jail_path: String,
+}
 
 pub fn run(config: &Config) -> Result<()> {
     ui::print_step(&format!("Running deploy for {} hosts", config.hosts.len()));
@@ -56,7 +79,15 @@ fn deploy_to_host(config: &Config, host: &str, spinner: &ProgressBar) -> Result<
     let cmd_prefix = if config.doas { "doas " } else { "" };
 
     // Run remaining deployment steps, cleaning up the jail on failure
-    let result = deploy_jail_steps(config, host, &jail_info, cmd_prefix, spinner);
+    let result = deploy_jail_steps(
+        config,
+        host,
+        &jail_info,
+        &base_version,
+        &image_path,
+        cmd_prefix,
+        spinner,
+    );
 
     if let Err(ref e) = result {
         spinner.set_message(format!("[{}] Deployment failed, cleaning up jail {}...", host, jail_info.name));
@@ -72,6 +103,8 @@ fn deploy_jail_steps(
     config: &Config,
     host: &str,
     jail_info: &jail::JailInfo,
+    base_version: &str,
+    image_path: &str,
     cmd_prefix: &str,
     spinner: &ProgressBar,
 ) -> Result<()> {
@@ -92,6 +125,9 @@ fn deploy_jail_steps(
 
     // 10. Start services
     start_services(config, host, jail_info, cmd_prefix, spinner)?;
+
+    // 10.5. Write jail metadata and update active symlink (for boot persistence)
+    write_metadata_and_activate(config, host, jail_info, base_version, image_path, cmd_prefix, spinner)?;
 
     // 11. Update proxy configuration
     update_proxy(config, host, jail_info, cmd_prefix, spinner)?;
@@ -431,6 +467,62 @@ fn start_services(
     Ok(())
 }
 
+fn write_metadata_and_activate(
+    config: &Config,
+    host: &str,
+    jail_info: &jail::JailInfo,
+    base_version: &str,
+    image_path: &str,
+    cmd_prefix: &str,
+    spinner: &ProgressBar,
+) -> Result<()> {
+    spinner.set_message(format!("[{}] Writing jail metadata...", host));
+
+    // Build data directory mappings
+    let data_dirs: Vec<DataDirectoryMapping> = config
+        .data_directories
+        .iter()
+        .map(|d| {
+            let (host_path, jail_path) = d.get_paths();
+            DataDirectoryMapping {
+                host_path,
+                jail_path,
+            }
+        })
+        .collect();
+
+    let metadata = JailMetadata {
+        service: config.service.clone(),
+        jail_name: jail_info.name.clone(),
+        ip: jail_info.ip.clone(),
+        user: config.user.clone(),
+        start_commands: config.start.clone(),
+        env_file: JAIL_ENV_FILE.to_string(),
+        app_dir: JAIL_APP_DIR.to_string(),
+        data_directories: data_dirs,
+        base_version: base_version.to_string(),
+        image_path: Some(image_path.to_string()),
+        zfs: jail_info.zfs,
+    };
+
+    let metadata_json = serde_json::to_string_pretty(&metadata)?;
+    let metadata_path = format!("{}/.bsdeploy.json", jail_info.path);
+    remote::write_file(host, &metadata_json, &metadata_path, config.doas)?;
+
+    // Update active symlink
+    spinner.set_message(format!("[{}] Updating active symlink...", host));
+    let symlink_path = format!("{}/{}", ACTIVE_DIR, config.service);
+
+    // Remove old symlink if exists, then create new one
+    remote::run(host, &format!("{}rm -f {}", cmd_prefix, symlink_path))?;
+    remote::run(
+        host,
+        &format!("{}ln -s {} {}", cmd_prefix, jail_info.path, symlink_path),
+    )?;
+
+    Ok(())
+}
+
 fn update_proxy(
     config: &Config,
     host: &str,
@@ -587,4 +679,141 @@ fn prune_old_jails(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_jail_metadata_serialization() {
+        let metadata = JailMetadata {
+            service: "myapp".to_string(),
+            jail_name: "myapp-20240115-120000".to_string(),
+            ip: "10.0.0.2".to_string(),
+            user: Some("deploy".to_string()),
+            start_commands: vec!["bin/rails server".to_string()],
+            env_file: "/etc/bsdeploy.env".to_string(),
+            app_dir: "/app".to_string(),
+            data_directories: vec![DataDirectoryMapping {
+                host_path: "/var/db/bsdeploy/myapp/storage".to_string(),
+                jail_path: "/app/storage".to_string(),
+            }],
+            base_version: "14.1-RELEASE".to_string(),
+            image_path: Some("/usr/local/bsdeploy/images/abc123".to_string()),
+            zfs: true,
+        };
+
+        let json = serde_json::to_string_pretty(&metadata).unwrap();
+
+        // Verify all fields are serialized correctly
+        assert!(json.contains(r#""service": "myapp""#));
+        assert!(json.contains(r#""jail_name": "myapp-20240115-120000""#));
+        assert!(json.contains(r#""ip": "10.0.0.2""#));
+        assert!(json.contains(r#""user": "deploy""#));
+        assert!(json.contains(r#""bin/rails server""#));
+        assert!(json.contains(r#""env_file": "/etc/bsdeploy.env""#));
+        assert!(json.contains(r#""app_dir": "/app""#));
+        assert!(json.contains(r#""base_version": "14.1-RELEASE""#));
+        assert!(json.contains(r#""zfs": true"#));
+    }
+
+    #[test]
+    fn test_jail_metadata_without_user() {
+        let metadata = JailMetadata {
+            service: "myapp".to_string(),
+            jail_name: "myapp-20240115-120000".to_string(),
+            ip: "10.0.0.2".to_string(),
+            user: None,
+            start_commands: vec!["bin/server".to_string()],
+            env_file: "/etc/bsdeploy.env".to_string(),
+            app_dir: "/app".to_string(),
+            data_directories: vec![],
+            base_version: "14.1-RELEASE".to_string(),
+            image_path: None,
+            zfs: false,
+        };
+
+        let json = serde_json::to_string_pretty(&metadata).unwrap();
+
+        // Verify null values are serialized correctly
+        assert!(json.contains(r#""user": null"#));
+        assert!(json.contains(r#""image_path": null"#));
+        assert!(json.contains(r#""zfs": false"#));
+    }
+
+    #[test]
+    fn test_jail_metadata_multiple_start_commands() {
+        let metadata = JailMetadata {
+            service: "myapp".to_string(),
+            jail_name: "myapp-20240115-120000".to_string(),
+            ip: "10.0.0.2".to_string(),
+            user: None,
+            start_commands: vec![
+                "bin/rails server".to_string(),
+                "bin/sidekiq".to_string(),
+                "bin/cable".to_string(),
+            ],
+            env_file: "/etc/bsdeploy.env".to_string(),
+            app_dir: "/app".to_string(),
+            data_directories: vec![],
+            base_version: "14.1-RELEASE".to_string(),
+            image_path: None,
+            zfs: false,
+        };
+
+        let json = serde_json::to_string_pretty(&metadata).unwrap();
+
+        // Verify multiple start commands are serialized
+        assert!(json.contains("bin/rails server"));
+        assert!(json.contains("bin/sidekiq"));
+        assert!(json.contains("bin/cable"));
+    }
+
+    #[test]
+    fn test_data_directory_mapping_serialization() {
+        let mapping = DataDirectoryMapping {
+            host_path: "/var/db/bsdeploy/myapp/uploads".to_string(),
+            jail_path: "/app/public/uploads".to_string(),
+        };
+
+        let json = serde_json::to_string(&mapping).unwrap();
+
+        assert!(json.contains(r#""host_path":"/var/db/bsdeploy/myapp/uploads""#));
+        assert!(json.contains(r#""jail_path":"/app/public/uploads""#));
+    }
+
+    #[test]
+    fn test_jail_metadata_multiple_data_directories() {
+        let metadata = JailMetadata {
+            service: "myapp".to_string(),
+            jail_name: "myapp-20240115-120000".to_string(),
+            ip: "10.0.0.2".to_string(),
+            user: None,
+            start_commands: vec![],
+            env_file: "/etc/bsdeploy.env".to_string(),
+            app_dir: "/app".to_string(),
+            data_directories: vec![
+                DataDirectoryMapping {
+                    host_path: "/var/db/bsdeploy/myapp/storage".to_string(),
+                    jail_path: "/app/storage".to_string(),
+                },
+                DataDirectoryMapping {
+                    host_path: "/var/db/bsdeploy/myapp/uploads".to_string(),
+                    jail_path: "/app/public/uploads".to_string(),
+                },
+            ],
+            base_version: "14.1-RELEASE".to_string(),
+            image_path: None,
+            zfs: false,
+        };
+
+        let json = serde_json::to_string_pretty(&metadata).unwrap();
+
+        // Verify both data directories are serialized
+        assert!(json.contains("/var/db/bsdeploy/myapp/storage"));
+        assert!(json.contains("/app/storage"));
+        assert!(json.contains("/var/db/bsdeploy/myapp/uploads"));
+        assert!(json.contains("/app/public/uploads"));
+    }
 }

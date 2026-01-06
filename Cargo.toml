@@ -1,6 +1,6 @@
 [package]
 name = "bsdeploy"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Robin Brandt <robin@evernet2000.de>"]
 description = "A deployment tool to FreeBSD servers using jails."
@@ -17,6 +17,7 @@ hex = "0.4.3"
 indicatif = "0.18.3"
 log = "0.4.29"
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"
 wait-timeout = "0.2"
